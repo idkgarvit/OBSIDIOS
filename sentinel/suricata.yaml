@@ -1,0 +1,80 @@
+# OBSIDIOS SENTINEL — Suricata Configuration Template
+# Auto-generated. Matches FORGE rule format and eve-log output.
+
+%YAML 1.1
+---
+
+vars:
+  address-groups:
+    HOME_NET: "[192.168.0.0/16,10.0.0.0/8,172.16.0.0/12]"
+    EXTERNAL_NET: "!$HOME_NET"
+  port-groups:
+    HTTP_PORTS: "80"
+    SHELLCODE_PORTS: "!80"
+    SSH_PORTS: "22"
+
+default-rule-path: /var/lib/suricata/rules
+rule-files:
+  - /app/forge/rules/suricata.rules
+  - /var/lib/suricata/rules/emerging-all.rules
+
+classification-file: /etc/suricata/classification.config
+reference-config-file: /etc/suricata/reference.config
+
+runmode: autofp
+
+outputs:
+  - eve-log:
+      enabled: yes
+      filetype: regular
+      filename: eve.json
+      types:
+        - alert:
+            payload: no
+            payload-buffer: 0
+            packet: no
+            http-body: no
+            metadata: yes
+            tagged-packets: no
+        - flow:
+            enabled: no
+        - dns:
+            enabled: no
+        - tls:
+            enabled: no
+        - stats:
+            enabled: no
+
+af-packet:
+  - interface: default
+    cluster-id: 99
+    cluster-type: cluster_flow
+    defrag: yes
+    use-mmap: yes
+    tpacket-v3: yes
+
+app-layer:
+  protocols:
+    tls:
+      enabled: no
+    dns:
+      enabled: no
+    http:
+      enabled: no
+    ssh:
+      enabled: no
+
+stream:
+  reassembly:
+    depth: 1mb
+    toserver-chunk-size: 256
+    toclient-chunk-size: 256
+
+logging:
+  default-log-level: error
+  default-log-format: "[%i] %m"
+  outputs:
+    - console:
+        enabled: no
+    - file:
+        enabled: no

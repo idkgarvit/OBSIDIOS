@@ -1,0 +1,138 @@
+services:
+  caddy:
+    container_name: caddy-proxy
+    depends_on:
+    - obsidios-dash
+    image: caddy:latest
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+    - ./Caddyfile:/etc/caddy/Caddyfile
+    - caddy_data:/data
+    - caddy_config:/config
+  obsidios-daemon:
+    build: .
+    command:
+    - python3
+    - obsidios.py
+    - run
+    container_name: obsidios-daemon
+    environment:
+    - PYTHONUNBUFFERED=1
+    network_mode: host
+    privileged: true
+    restart: unless-stopped
+    volumes:
+    - ./chronicle:/app/chronicle
+    - ./obsidios.py:/app/obsidios.py
+    - ./oracle:/app/oracle
+    - ./echo:/app/echo
+    - ./shield:/app/shield
+    - ./forge:/app/forge
+    - ./phantom:/app/phantom
+    - ./iris:/app/iris
+    - ./alerts:/app/alerts
+    - ./logs:/app/logs
+    - ./reports:/app/reports
+    - ./config:/app/config
+    - ./nuclei:/usr/local/bin/nuclei
+    - ./nt.zip:/tmp/nt.zip
+    - ./.env:/app/.env
+  obsidios-dash:
+    build: .
+    command:
+    - python3
+    - obsidios.py
+    - dash
+    - --port
+    - '8080'
+    container_name: obsidios-dash
+    depends_on:
+    - obsidios-daemon
+    environment:
+    - PYTHONUNBUFFERED=1
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+    - ./chronicle:/app/chronicle
+    - ./obsidios.py:/app/obsidios.py
+    - ./oracle:/app/oracle
+    - ./echo:/app/echo
+    - ./shield:/app/shield
+    - ./forge:/app/forge
+    - ./phantom:/app/phantom
+    - ./iris:/app/iris
+    - ./alerts:/app/alerts
+    - ./dashboard:/app/dashboard
+    - ./logs:/app/logs
+    - ./config:/app/config
+    - ./.env:/app/.env
+  obsidios-echo:
+    build: .
+    cap_add:
+    - NET_RAW
+    - NET_ADMIN
+    command:
+    - python3
+    - obsidios.py
+    - echo
+    - --iface
+    - eth0
+    - --duration
+    - '60'
+    container_name: obsidios-echo
+    depends_on:
+    - obsidios-daemon
+    environment:
+    - PYTHONUNBUFFERED=1
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+    - ./chronicle:/app/chronicle
+    - ./obsidios.py:/app/obsidios.py
+    - ./oracle:/app/oracle
+    - ./echo:/app/echo
+    - ./shield:/app/shield
+    - ./forge:/app/forge
+    - ./phantom:/app/phantom
+    - ./iris:/app/iris
+    - ./alerts:/app/alerts
+    - ./logs:/app/logs
+    - ./config:/app/config
+    - ./.env:/app/.env
+  obsidios-sentinel:
+    build: .
+    cap_add:
+    - NET_RAW
+    - NET_ADMIN
+    - SYS_ADMIN
+    command:
+    - python3
+    - obsidios.py
+    - sentinel
+    - --iface
+    - eth0
+    container_name: obsidios-sentinel
+    depends_on:
+    - obsidios-daemon
+    environment:
+    - PYTHONUNBUFFERED=1
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+    - ./chronicle:/app/chronicle
+    - ./obsidios.py:/app/obsidios.py
+    - ./oracle:/app/oracle
+    - ./sentinel:/app/sentinel
+    - ./shield:/app/shield
+    - ./forge:/app/forge
+    - ./phantom:/app/phantom
+    - ./iris:/app/iris
+    - ./alerts:/app/alerts
+    - ./logs:/app/logs
+    - ./config:/app/config
+    - ./.env:/app/.env
+    - /var/log/suricata:/var/log/suricata
+volumes:
+  caddy_config: null
+  caddy_data: null

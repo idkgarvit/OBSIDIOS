@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+      - name: Check syntax
+        run: |
+          python3 -m py_compile obsidios.py
+          python3 -m py_compile config/settings.py
+          python3 -m py_compile chronicle/db.py
+          python3 -m py_compile chronicle/schema.py
+          for f in iris/*.py oracle/*.py phantom/*.py forge/*.py sentinel/*.py shield/*.py echo/*.py dashboard/*.py alerts/*.py; do
+            python3 -m py_compile "$f"
+          done
+      - name: Run tests
+        run: |
+          python3 -m pytest tests/ -v --tb=short
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker image
+        run: |
+          docker build -t obsidios --no-cache .
+      - name: Verify container starts
+        run: |
+          docker run --rm obsidios python3 obsidios.py --help

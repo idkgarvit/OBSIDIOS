@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.env
+
+# Backup files
+*.bak
+*.save
+*.orig
+
+# Project-specific — runtime database
+chronicle/obsidios.db*
+
+# Logs and reports
+logs/
+reports/output/*
+
+# Development config
+.claude/
+CLAUDE.md
+
+# AI IDE project files
+.ai_hub_project
+
+# Forge rules (generated — contains local IPs)
+forge/rules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Test / CI
+.pytest_cache/
+.coverage
+htmlcov/
