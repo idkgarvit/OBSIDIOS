@@ -10,10 +10,10 @@
 
   </pre>
 
-  <h1>Autonomous Predictive Network Security Platform</h1>
+  <h1>OBSIDIOS — Autonomous Predictive Network Security Platform</h1>
 
   <p>
-    <strong>Real-time host discovery · AI-driven vulnerability mapping · Attack path simulation · 3D tactical dashboard · Automated defense</strong>
+    <strong>OBSIDIOS · Real-time host discovery · AI-driven vulnerability mapping · Attack path simulation · 3D tactical dashboard · Automated defense</strong>
   </p>
 
   <p>
