@@ -127,13 +127,12 @@ def _find_kill_chains(
                 path_nodes = nx.dijkstra_path(
                     graph, entry_id, target_id, weight="weight"
                 )
+                if len(path_nodes) > max_depth:
+                    continue
                 path_cost = nx.dijkstra_path_length(
                     graph, entry_id, target_id, weight="weight"
-                ) if len(path_nodes) <= max_depth else 0.0
+                )
             except (nx.NetworkXNoPath, nx.NodeNotFound):
-                continue
-
-            if len(path_nodes) > max_depth:
                 continue
 
             # Build steps
@@ -244,6 +243,8 @@ async def run_simulation(max_paths: int = 10) -> SimulationResult:
                 f"{graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges")
 
     # ── Get entry points and targets ───────────────────────────────────
+    # Entries = most exposed (perimeter), Targets = highest value (crown jewels).
+    # Keep them disjoint so high-value hosts are not used as entry points.
     entries = get_most_exposed_entries(top_n=5)
     targets = get_highest_value_targets(top_n=3)
 
@@ -257,6 +258,11 @@ async def run_simulation(max_paths: int = 10) -> SimulationResult:
     # Filter out gateway/router as an attack target (infrastructure, not a target)
     gateway_ip = os.environ.get('OBSIDIOS_GATEWAY', '192.168.1.1')
     targets = [t for t in targets if t.get('ip') != gateway_ip]
+    target_ids = {t["id"] for t in targets}
+    # Disjoint entries: prefer exposed hosts that are NOT top-value targets
+    filtered_entries = [e for e in entries if e["id"] not in target_ids]
+    if filtered_entries:
+        entries = filtered_entries
 
     if not entries:
         logger.warning("[PHANTOM] No entry points found")

@@ -278,6 +278,26 @@ async def _run_scan_cycle_wrapped():
 async def _run_all(target: str, interval: int) -> None:
     settings.scan.target_network        = target
     settings.scan.scan_interval_seconds = interval
+    # Company-infra startup guards: fail closed in production, warn in dev
+    try:
+        from config.settings import validate_prod_config, validate_target_cidr, security as _sec
+        prod_errors = validate_prod_config()
+        if prod_errors:
+            for e in prod_errors:
+                console.print(f"  [bold red]BLOCKED:[/] {e}")
+            logger.error(f"[OBSIDIOS] Production guardrails failed: {prod_errors}")
+            raise SystemExit(2)
+        ok, reason = validate_target_cidr(target)
+        if not ok:
+            console.print(f"  [bold red]BLOCKED target {target}:[/] {reason}")
+            logger.error(f"[OBSIDIOS] Refusing target {target}: {reason}")
+            raise SystemExit(2)
+        if _sec.is_production:
+            console.print("  [bold green]Guards:[/] production checks passed (secret, creds, target)")
+    except SystemExit:
+        raise
+    except Exception as e:
+        logger.warning(f"[OBSIDIOS] Guard check skipped: {e}")
     await db.init()
     # Start paused — scanner only activates when user explicitly enables it
     await db.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES ('scanner_enabled', '0')")

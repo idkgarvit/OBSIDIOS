@@ -193,11 +193,12 @@ python3 obsidios.py --help
 
 ## API Endpoints (Dashboard)
 
-The Flask dashboard exposes a JSON API under `/api/v2/` with JWT Bearer authentication (obtain token via `POST /api/v2/login` with credentials `admin` / `obsidios123`):
+The Flask dashboard exposes a JSON API under `/api/v2/` with JWT Bearer authentication (obtain token via `POST /api/login` — see below; change defaults via `DASHBOARD_USER`/`DASHBOARD_PASS` in `.env`):
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET  /api/v2/login` | JWT authentication |
+| `POST /api/login` | JWT authentication (4h expiry) |
+| `GET  /api/health` | Unauthenticated liveness probe (Docker healthcheck) |
 | `GET  /api/v2/stats` | Dashboard overview statistics |
 | `GET  /api/v2/graph` | 3D attack graph data (nodes + simplified edges) |
 | `GET  /api/v2/cves` | All CVEs with severity, verification status |
@@ -218,7 +219,7 @@ The Flask dashboard exposes a JSON API under `/api/v2/` with JWT Bearer authenti
 | `POST /api/v2/actions/cancel_scan` | Cancel active scan |
 | `POST /api/v2/cves/reverify` | Re-run CVE version verification |
 
-Authentication: Bearer JWT token obtained from `POST /api/v2/login`.
+Authentication: Bearer JWT token obtained from `POST /api/login`.
 
 ---
 
@@ -255,7 +256,7 @@ Configurable retention period (1–365 days, default 30). Auto-prune at scan cyc
 
 | Problem | Likely Cause | Fix |
 |---------|-------------|-----|
-| Container exits immediately | Missing `--privileged` or `--network host` | Ensure `docker-compose.yml` has `privileged: true` and `network_mode: host` for daemon/sentinel |
+| Container exits immediately | Missing capabilities or `--network host` | Ensure `docker-compose.yml` has `cap_add: [NET_RAW, NET_ADMIN]` and `network_mode: host` for daemon/sentinel |
 | `obsidios-dash` won't start | Port 8080 already in use | `lsof -ti:8080 \| xargs kill` or change port in `.env` |
 | Permission denied on `/proc/net/dev` | Container lacks `--network host` | Add `network_mode: host` to dashboard service |
 

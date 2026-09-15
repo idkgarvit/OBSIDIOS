@@ -62,7 +62,23 @@ def run_async(coro, timeout=120.0):
         raise TimeoutError(f"Operation timed out after {timeout}s")
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'obsidios-secret-fallback-for-dev')
+def _resolve_app_secret() -> str:
+    for k in ('OBSIDIOS_SECRET', 'SECRET_KEY'):
+        v = os.environ.get(k, '').strip()
+        if v:
+            return v
+    try:
+        from config.settings import dash as _dash
+        if _dash.secret_key:
+            return _dash.secret_key
+    except Exception:
+        pass
+    return ''
+_resolved_secret = _resolve_app_secret()
+if not _resolved_secret or _resolved_secret in ('obsidios-secret-fallback-for-dev', 'changeme', ''):
+    logger.warning("[DASHBOARD] OBSIDIOS_SECRET not set or weak — set 32+ random bytes. Dev-only fallback in use.")
+    _resolved_secret = 'obsidios-secret-fallback-for-dev-only-do-not-use-in-prod'
+app.config['SECRET_KEY'] = _resolved_secret
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.jinja_env.auto_reload = True
 
@@ -89,11 +105,23 @@ def socketio_log_sink(message):
 
 logger.add(socketio_log_sink, level='INFO', format='{message}', backtrace=False, diagnose=False)
 
-socketio = SocketIO(app, async_mode='threading', cors_allowed_origins=os.environ.get('CORS_ORIGINS', '*'))
+socketio = SocketIO(app, async_mode='threading', cors_allowed_origins=os.environ.get('CORS_ORIGINS', 'http://localhost:8080').split(','))
 
 _rate_limit_store = {}
 RATE_LIMIT_WINDOW = 60
 RATE_LIMIT_MAX = 50
+_LOGIN_FAILS: dict[str, list[float]] = {}
+LOGIN_LOCKOUT_THRESHOLD = 5
+LOGIN_LOCKOUT_SECONDS = 300
+
+def _is_locked_out(ip: str) -> bool:
+    now = time.time()
+    fails = [t for t in _LOGIN_FAILS.get(ip, []) if now - t < LOGIN_LOCKOUT_SECONDS]
+    _LOGIN_FAILS[ip] = fails
+    return len(fails) >= LOGIN_LOCKOUT_THRESHOLD
+
+def _record_login_fail(ip: str) -> None:
+    _LOGIN_FAILS.setdefault(ip, []).append(time.time())
 
 def check_auth(username, password):
     expected_user = os.environ.get('DASHBOARD_USER', 'admin')
@@ -108,7 +136,13 @@ def requires_auth(f):
         if not token or not token.startswith('Bearer '):
             return jsonify({'error': 'Token is missing'}), 401
         try:
-            jwt.decode(token.split(' ')[1], app.config['SECRET_KEY'], algorithms=['HS256'])
+            payload = jwt.decode(token.split(' ')[1], app.config['SECRET_KEY'], algorithms=['HS256'], options={'require': ['exp']})
+            # Enforce issuer when present (company deployments set iss=obsidios)
+            iss = payload.get('iss')
+            if iss is not None and iss != 'obsidios':
+                return jsonify({'error': 'Token is invalid'}), 401
+        except jwt.ExpiredSignatureError:
+            return jsonify({'error': 'Token expired'}), 401
         except Exception:
             return jsonify({'error': 'Token is invalid'}), 401
         return f(*args, **kwargs)
@@ -128,15 +162,38 @@ def rate_limit(f):
         return f(*args, **kwargs)
     return decorated
 
+@app.route('/api/health', methods=['GET'])
+def health():
+    """Unauthenticated liveness probe for Docker/K8s. No DB dependency."""
+    return jsonify({'status': 'ok', 'service': 'obsidios-dash'}), 200
+
+
 @app.route('/api/login', methods=['POST'])
 @rate_limit
 def login():
-    data = request.json
-    if not data or not data.get('username') or not data.get('password'):
+    import hmac
+    client_ip = request.remote_addr or 'unknown'
+    if _is_locked_out(client_ip):
+        return jsonify({'error': 'Too many failed attempts. Try again later.'}), 429
+    data = request.get_json(silent=True) or {}
+    if not data.get('username') or not data.get('password'):
         return jsonify({'error': 'Missing credentials'}), 400
     if check_auth(data['username'], data['password']):
-        token = jwt.encode({'user': data['username'], 'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)}, app.config['SECRET_KEY'], algorithm='HS256')
-        return jsonify({'token': token})
+        _LOGIN_FAILS.pop(client_ip, None)
+        # 4h expiry for company use (was 24h). Includes iss for validation.
+        exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=4)
+        token = jwt.encode({'user': data['username'], 'iss': 'obsidios', 'exp': exp}, app.config['SECRET_KEY'], algorithm='HS256')
+        try:
+            from dashboard import db_sync as _db
+            _db.execute("INSERT INTO system_settings(key,value) VALUES('last_login_'+?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (data['username'], str(time.time())))
+        except Exception:
+            pass
+        logger.info(f"[AUTH] Login success user={data['username']} ip={client_ip}")
+        return jsonify({'token': token, 'expires_in': 14400})
+    _record_login_fail(client_ip)
+    # Constant-time-ish response to avoid user enumeration timing leaks
+    hmac.compare_digest(data.get('username', ''), 'x' * len(data.get('username', '')))
+    logger.warning(f"[AUTH] Login failed user={data.get('username')} ip={client_ip}")
     return jsonify({'error': 'Invalid credentials'}), 401
 
 
@@ -170,6 +227,13 @@ def add_no_cache(response):
     response.headers['Cache-Control'] = 'no-store, must-revalidate'
     response.headers['Pragma'] = 'no-cache'
     response.headers['Expires'] = '0'
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'no-referrer'
+    # Dashboard is VPN-only; keep CSP tight for local Three.js + inline UI
+    response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:"
+    if os.environ.get('OBSIDIOS_ENV', 'dev').lower() in ('prod', 'production'):
+        response.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
     return response
 
 @app.route('/')

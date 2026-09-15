@@ -41,6 +41,48 @@ AUTO_ACT_THRESHOLD = 0.85
 ALERT_THRESHOLD    = 0.70
 
 
+def _shield_cfg():
+    try:
+        from config.settings import shield_cfg as _c, parse_shield_allowlist, is_ip_allowlisted
+        return _c, parse_shield_allowlist, is_ip_allowlisted
+    except Exception:
+        return None, None, None
+
+
+async def _shield_guard(target_ip: str, action: str) -> tuple[bool, str]:
+    """Company safety: dry-run, allowlist, rate-limit. Returns (allowed, reason)."""
+    import os, time as _t
+    cfg, parse_fn, match_fn = _shield_cfg()
+    dry = os.environ.get("SHIELD_DRY_RUN", "1").strip().lower() in ("1", "true", "yes")
+    if cfg is not None:
+        try:
+            dry = bool(cfg.dry_run)
+        except Exception:
+            pass
+    if dry:
+        return False, f"DRY-RUN active — would {action} {target_ip} (set SHIELD_DRY_RUN=0 to enforce)"
+    # Allowlist: never block gateway, DNS, loopback, or operator list
+    try:
+        gw = os.environ.get("OBSIDIOS_GATEWAY", "192.168.1.1")
+        allow = parse_fn(gw) if parse_fn else [gw]
+        if match_fn and match_fn(target_ip, allow):
+            return False, f"Allowlisted — refusing to {action} protected {target_ip}"
+    except Exception:
+        pass
+    # Rate-limit: max N enforcements per hour (prevents block storms)
+    try:
+        max_n = int(os.environ.get("SHIELD_MAX_ACTIONS_PER_HOUR", "10"))
+        if cfg is not None:
+            max_n = int(getattr(cfg, "max_actions_per_hour", max_n))
+        from chronicle import db as _db
+        cnt = await _db.fetch_val("SELECT COUNT(*) FROM shield_actions WHERE taken_at > ?", (_t.time() - 3600,), default=0)
+        if (cnt or 0) >= max_n:
+            return False, f"Rate-limited ({cnt}/{max_n} blocks this hour) — alert only"
+    except Exception:
+        pass
+    return True, "ok"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # iptables wrapper
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,6 +135,23 @@ async def block_ip(
     Block all traffic from a source IP.
     Inserts an iptables DROP rule for the src IP.
     """
+    import ipaddress as _ip
+    try:
+        _ip.ip_address(src_ip.strip())
+    except Exception:
+        return {"status": "rejected", "ip": src_ip, "reason": "invalid IP"}
+    allowed, reason = await _shield_guard(src_ip, "BLOCK_IP")
+    if not allowed:
+        logger.warning(f"[SHIELD] Guard refused BLOCK_IP {src_ip}: {reason}")
+        # Audit the refused attempt so operators see dry-run intent
+        try:
+            await db.execute(
+                "INSERT INTO shield_actions (action_type,target_ip,rule_applied,trigger_type,trigger_id,confidence,justification,is_active) VALUES (?,?,?,?,?,?,?,0)",
+                (str(ShieldActionType.BLOCK_IP), src_ip, f"REFUSED: {reason}", trigger_type, trigger_id, confidence, justification + f" [{reason}]"),
+            )
+        except Exception:
+            pass
+        return {"status": "refused", "ip": src_ip, "reason": reason}
     rule = f"-A INPUT -s {src_ip} -j DROP"
 
     # Check if already blocked
@@ -142,6 +201,25 @@ async def block_path(
     Block traffic from src_ip to dst_ip:dst_port.
     More surgical than block_ip — only blocks this specific attack path.
     """
+    import ipaddress as _ip
+    try:
+        _ip.ip_address(src_ip.strip()); _ip.ip_address(dst_ip.strip())
+        _port = int(dst_port); assert 1 <= _port <= 65535
+        assert protocol in ("tcp", "udp", "icmp")
+    except Exception:
+        return {"status": "rejected", "reason": "invalid src/dst/port/protocol"}
+    for _t in (src_ip, dst_ip):
+        allowed, reason = await _shield_guard(_t, "BLOCK_PATH")
+        if not allowed:
+            logger.warning(f"[SHIELD] Guard refused BLOCK_PATH {src_ip}->{dst_ip}:{dst_port}: {reason}")
+            try:
+                await db.execute(
+                    "INSERT INTO shield_actions (action_type,target_ip,target_port,rule_applied,trigger_type,trigger_id,confidence,justification,is_active) VALUES (?,?,?,?,?,?,?,?,0)",
+                    (str(ShieldActionType.BLOCK_PATH), dst_ip, int(dst_port), f"REFUSED: {reason}", trigger_type, trigger_id, confidence, justification + f" [{reason}]"),
+                )
+            except Exception:
+                pass
+            return {"status": "refused", "src_ip": src_ip, "dst_ip": dst_ip, "dst_port": dst_port, "reason": reason}
     rule = f"-A FORWARD -s {src_ip} -d {dst_ip} -p {protocol} --dport {dst_port} -j DROP"
 
     # Check if this exact path is already actively blocked BEFORE inserting iptables rule
@@ -200,7 +278,29 @@ async def quarantine_host(
     """
     Full quarantine — block all inbound AND outbound traffic for a host.
     Used when ECHO detects high-confidence compromise.
+    Company default: disabled unless SHIELD_AUTO_QUARANTINE=1 + manual approval.
     """
+    import os
+    try:
+        from config.settings import shield_cfg as _sc
+        auto_q = bool(_sc.auto_quarantine)
+    except Exception:
+        auto_q = False
+    auto_q = auto_q or os.environ.get("SHIELD_AUTO_QUARANTINE", "0").strip().lower() in ("1", "true", "yes")
+    if not auto_q:
+        logger.warning(f"[SHIELD] Quarantine refused for {ip}: SHIELD_AUTO_QUARANTINE=0 (alert only)")
+        try:
+            await db.execute(
+                "INSERT INTO shield_actions (action_type,target_ip,rule_applied,trigger_type,trigger_id,confidence,justification,is_active) VALUES (?,?,?,?,?,?,?,0)",
+                (str(ShieldActionType.QUARANTINE_HOST), ip, "REFUSED: auto-quarantine disabled", trigger_type, trigger_id, confidence, justification + " [requires SHIELD_AUTO_QUARANTINE=1]"),
+            )
+        except Exception:
+            pass
+        return {"status": "refused", "ip": ip, "reason": "auto-quarantine disabled"}
+    allowed, reason = await _shield_guard(ip, "QUARANTINE_HOST")
+    if not allowed:
+        logger.warning(f"[SHIELD] Guard refused QUARANTINE {ip}: {reason}")
+        return {"status": "refused", "ip": ip, "reason": reason}
     results = []
 
     # Block inbound

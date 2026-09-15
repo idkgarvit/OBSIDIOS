@@ -162,8 +162,13 @@ def _rule_c2_beacon(
     src_ip: str, sid: int, path_id: int
 ) -> str:
     """Detect C2 beaconing — regular outbound intervals from compromised host."""
+    import os
+    # Use configured target network as HOME_NET instead of hardcoded lab subnet.
+    # OBSIDIOS_TARGET like 192.168.1.0/24 -> negate to !<net> for external C2.
+    home_net = os.environ.get("OBSIDIOS_TARGET", "192.168.1.0/24")
+    # Suricata !<cidr> syntax; fallback to $HOME_NET variable if set in suricata.yaml
     return (
-        f'alert tcp {src_ip} any -> !192.168.56.0/24 any '
+        f'alert tcp {src_ip} any -> !{home_net} any '
         f'(msg:"OBSIDIOS PHANTOM Path#{path_id} '
         f'C2 Beaconing Pattern from {src_ip}"; '
         f'flow:to_server,established; '

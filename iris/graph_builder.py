@@ -85,13 +85,14 @@ def _build_edges(g: nx.DiGraph) -> None:
     pivot_services = {22, 445, 3389, 5985, 5986, 23, 21}
     nodes = list(g.nodes(data=True))
     for src_id, src_data in nodes:
-        src_ports = {p["port"] for p in src_data.get("ports",[])}
-        can_pivot = bool(src_ports & pivot_services)
         for dst_id, dst_data in nodes:
             if src_id == dst_id: continue
             dst_ports = {p["port"] for p in dst_data.get("ports",[])}
-            if bool(dst_ports & pivot_services) or can_pivot or dst_data.get("cves"):
-                best_cvss = max((cv["effective_cvss"] for cv in dst_data.get("cves",[])), default=0.1)
+            # Only create edge if destination is actually exploitable:
+            # has pivot service OR has CVEs. Source pivot capability alone
+            # should not create edges to hardened hosts (avoids full-mesh).
+            if bool(dst_ports & pivot_services) or dst_data.get("cves"):
+                best_cvss = max((cv.get("effective_cvss") or cv.get("cvss_v3") or 0.0 for cv in dst_data.get("cves",[])), default=0.1)
                 cost = round(100.0 / max(best_cvss * 0.5, 0.01), 4)
                 g.add_edge(src_id, dst_id, weight=cost)
 
@@ -104,6 +105,7 @@ def export_for_dashboard() -> dict:
                    "os":d.get("os_name") or d.get("vendor") or "Unknown",
                    "asset":d.get("asset_value",5),"cve_count":len(d.get("cves",[])),
                    "port_count":len(d.get("ports",[]))} for nid,d in _graph.nodes(data=True)],
+        "links": [{"source": ip_by_id[u], "target": ip_by_id[v]} for u, v in _graph.edges()],
     }
 
 

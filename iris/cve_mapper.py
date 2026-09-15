@@ -424,6 +424,17 @@ async def lookup_cves(session, service, version=None, product=None, api_key=None
 
 async def map_cves_for_scan(scan_result, api_key=None) -> tuple[dict[str, list[CVE]], dict[str, list[dict]]]:
     """Maps CVEs per host:port. Returns (cve_map, affected_map)."""
+    import os
+    if not api_key:
+        # Fall back to env / settings so callers don't need to thread the key.
+        # NVD allows 5 req/30s without key, 50 req/30s with key.
+        api_key = os.environ.get("NVD_API_KEY", "").strip() or None
+        if not api_key:
+            try:
+                from config.settings import scan as _scan_cfg
+                api_key = (_scan_cfg.nvd_api_key or "").strip() or None
+            except Exception:
+                pass
     result_map = {}
     affected_map = {}  # cve_id -> list of constraints
     unique = {}
