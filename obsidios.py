@@ -462,6 +462,33 @@ def status():
     uvloop.run(_show())
 
 @cli.command()
+@click.option("--dest", default="reports/backups", help="Backup directory")
+@click.option("--keep", default=7, help="Keep newest N backups")
+def backup(dest, keep):
+    """Online SQLite backup (WAL-safe) + rotation. Safe to run while daemon is live."""
+    from pathlib import Path
+    from chronicle.backup import backup_db
+    src = settings.db.db_path
+    out = backup_db(src, Path(dest), keep=int(keep))
+    console.print(f"[bold green]Backup OK:[/] {out}")
+
+
+@cli.command()
+@click.argument("backup_file")
+@click.option("--force", is_flag=True, help="Skip confirmation prompt")
+def restore(backup_file, force):
+    """Restore DB from backup. Current DB is copied to .pre-restore-<ts>.bak first."""
+    from pathlib import Path
+    from chronicle.backup import restore_db
+    dest = Path(settings.db.db_path)
+    if not force and not click.confirm(f"Restore {backup_file} over {dest}? Current DB will be saved as .bak."):
+        console.print("[yellow]Aborted.[/]")
+        return
+    out = restore_db(Path(backup_file), dest)
+    console.print(f"[bold green]Restore OK:[/] {out} (restart daemon + dash)")
+
+
+@cli.command()
 @click.argument('framework', default='PCI-DSS')
 def audit(framework):
     """Run a compliance audit directly in the CLI."""

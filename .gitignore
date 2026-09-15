@@ -17,6 +17,7 @@ chronicle/obsidios.db*
 # Logs and reports
 logs/
 reports/output/*
+reports/backups/*
 
 # Development config
 .claude/
