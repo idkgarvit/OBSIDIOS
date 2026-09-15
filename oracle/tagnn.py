@@ -7,14 +7,18 @@ Predicts attack paths based purely on network topology and structural vulnerabil
 identifying potential zero-day lateral movement paths even when no known CVEs exist.
 """
 from __future__ import annotations
-import networkx as nx
+
 import json
 import os
-from typing import Any, List
+from typing import Any
+
+import networkx as nx
 from loguru import logger
+
 from chronicle import db
 
-async def run_tagnn_prediction() -> List[dict[str, Any]]:
+
+async def run_tagnn_prediction() -> list[dict[str, Any]]:
     """Analyze network topology to predict zero-day attack paths."""
     logger.info("[ORACLE/TAGNN] Initializing Topological Attack Graph prediction...")
     
@@ -26,8 +30,7 @@ async def run_tagnn_prediction() -> List[dict[str, Any]]:
         return []
         
     G = nx.DiGraph()
-    host_map = {h['id']: dict(h) for h in hosts}
-    
+
     # 1. Build the baseline graph
     for h in hosts:
         # Calculate a structural embedding score (mock GNN feature vector)

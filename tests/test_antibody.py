@@ -1,14 +1,15 @@
 """Tests for antibody learning loop: pure tuning + service + API."""
 import asyncio
 import json
+
 import pytest
 
+from antibody import service as svc
 from antibody.tuning import (
     fp_rate,
     normalize_verdict,
     suggest_for_rule,
 )
-from antibody import service as svc
 from dashboard.app import app
 
 

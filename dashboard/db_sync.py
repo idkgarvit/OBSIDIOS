@@ -1,6 +1,8 @@
 import sqlite3
 import time
+
 from config import settings
+
 
 def get_db_conn():
     db_path = settings.db.db_path

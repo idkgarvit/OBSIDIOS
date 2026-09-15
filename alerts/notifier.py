@@ -1,6 +1,12 @@
-import aiohttp, json, pathlib, os, time, asyncio
+import asyncio
+import os
+import pathlib
+import time
 from collections import defaultdict
+
+import aiohttp
 from loguru import logger
+
 from config.settings import alerts as alert_cfg
 
 _COLORS = {

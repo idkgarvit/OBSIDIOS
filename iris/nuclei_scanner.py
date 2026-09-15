@@ -1,9 +1,12 @@
 """iris/nuclei_scanner.py — High-speed vulnerability scanning via Nuclei"""
 from __future__ import annotations
-import asyncio, os
+
+import asyncio
 import json
-import subprocess
+import os
+
 from loguru import logger
+
 from chronicle import db
 
 _GENERIC_PROTOCOLS = {"http", "https", "tcp", "udp", "http-proxy", "http-alt"}

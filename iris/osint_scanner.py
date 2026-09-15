@@ -1,12 +1,14 @@
-import shodan
 import asyncio
 import ipaddress
-import subprocess
-import re
 import os
+import re
+import subprocess
+
+import shodan
 from loguru import logger
-from config.settings import osint as osint_cfg
+
 from chronicle import db
+from config.settings import osint as osint_cfg
 
 # Known MAC OUI prefixes for device identification
 _MAC_VENDORS: dict[str, str] = {
@@ -27,7 +29,7 @@ _MAC_VENDORS: dict[str, str] = {
     "14:58:D0": "HP",
     "3C:D9:2B": "HP",
     "00:0E:C6": "Cisco",
-    "18:FE:34": "Cisco",
+    "18:FE:34": "Espressif",
     "00:0C:42": "Netgear",
     "D8:1C:79": "Netgear",
     "A0:04:60": "Asus",
@@ -43,7 +45,6 @@ _MAC_VENDORS: dict[str, str] = {
     "68:7A:B3": "ESP_XXXX (Espressif)",
     "24:0A:C4": "Espressif",
     "84:0D:8E": "Espressif",
-    "18:FE:34": "Ubiquiti",
     "74:83:C2": "Ubiquiti",
     "00:26:B9": "TP-Link",
     "50:C7:BF": "TP-Link",

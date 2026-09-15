@@ -1,10 +1,9 @@
 """Tests for phantom/path_finder.py — MITRE ATT&CK mapping and kill chains."""
 import math
+
 import networkx as nx
-from phantom.path_finder import (
-    _get_technique_for_node, MITRE_MAP, CVE_TECHNIQUE_MAP, _find_kill_chains
-)
-from chronicle.models import AttackStep
+
+from phantom.path_finder import CVE_TECHNIQUE_MAP, MITRE_MAP, _find_kill_chains, _get_technique_for_node
 
 
 class TestGetTechniqueForNode:

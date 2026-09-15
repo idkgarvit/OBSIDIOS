@@ -1,9 +1,14 @@
 """iris/graph_builder.py — NetworkX attack graph"""
 from __future__ import annotations
-import asyncio, json, os
+
+import asyncio
+import json
+import os
 from typing import Any
+
 import networkx as nx
 from loguru import logger
+
 from chronicle import db
 
 _graph: nx.DiGraph = nx.DiGraph()
@@ -84,7 +89,7 @@ def _compute_risk(node: dict[str, Any]) -> float:
 def _build_edges(g: nx.DiGraph) -> None:
     pivot_services = {22, 445, 3389, 5985, 5986, 23, 21}
     nodes = list(g.nodes(data=True))
-    for src_id, src_data in nodes:
+    for src_id, _src_data in nodes:
         for dst_id, dst_data in nodes:
             if src_id == dst_id: continue
             dst_ports = {p["port"] for p in dst_data.get("ports",[])}

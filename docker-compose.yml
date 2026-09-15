@@ -12,6 +12,7 @@ services:
     - caddy_config:/config
   obsidios-daemon:
     build: .
+    user: root
     command:
     - python3
     - obsidios.py
@@ -115,6 +116,7 @@ services:
     - ./.env:/app/.env
   obsidios-echo:
     build: .
+    user: root
     cap_add:
     - NET_RAW
     security_opt:
@@ -156,6 +158,7 @@ services:
     - ./.env:/app/.env
   obsidios-sentinel:
     build: .
+    user: root
     cap_add:
     - NET_RAW
     - NET_ADMIN

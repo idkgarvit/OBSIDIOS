@@ -3,9 +3,11 @@ chronicle/models.py
 Pydantic v2 typed data models for all OBSIDIOS data structures.
 """
 from __future__ import annotations
+
 import time
 from enum import StrEnum
 from typing import Any
+
 from pydantic import BaseModel, Field, field_validator
 
 

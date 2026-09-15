@@ -1,7 +1,7 @@
 """Tests for oracle modules — posture scoring, exploit validator, Claude client."""
-from oracle.posture_score import _generate_recommendations
-from iris.exploit_validator import get_exploit_link, KNOWN_EXPLOITS
+from iris.exploit_validator import KNOWN_EXPLOITS, get_exploit_link
 from oracle.claude_client import _count_by_key, _fallback_narrative, _fallback_remediation
+from oracle.posture_score import _generate_recommendations
 
 
 class TestGenerateRecommendations:

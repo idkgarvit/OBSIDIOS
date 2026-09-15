@@ -1,27 +1,27 @@
 # ─── Core Async ───────────────────────────────────────────────
 asyncio-throttle==1.0.2
-aiosqlite==0.20.0
-aiohttp==3.9.5
+aiosqlite>=0.20.0
+aiohttp>=3.10.0
 uvloop>=0.21.0
 
 # ─── Network Scanning ─────────────────────────────────────────
 python-nmap==0.7.1
-scapy==2.5.0
+scapy>=2.6.0
 netifaces==0.11.0
 
 # ─── Graph Engine ─────────────────────────────────────────────
-networkx==3.3
-matplotlib==3.9.0
+networkx>=3.3
+matplotlib>=3.9.0
 
 # ─── AI Brain ─────────────────────────────────────────────────
-anthropic==0.28.0
+anthropic>=0.40.0
 groq>=0.4.0
-httpx<0.28
+httpx<0.29
 openai>=1.0.0
 
 # ─── Web Dashboard ────────────────────────────────────────────
-flask[async]==3.0.3
-flask-socketio==5.3.6
+flask[async]>=3.1.0
+flask-socketio>=5.3.6
 
 # ─── Alerting ─────────────────────────────────────────────────
 discord-webhook==1.3.1

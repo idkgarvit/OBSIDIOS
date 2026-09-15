@@ -1,14 +1,15 @@
 """Tests for dashboard/app.py — Flask API endpoint tests."""
-import pytest
 import json
-import time
+
+import pytest
+
 from dashboard.app import app
 
 
 @pytest.fixture
 def client():
     app.config['TESTING'] = True
-    app.config['SECRET_KEY'] = 'test-secret-key'
+    app.config['SECRET_KEY'] = 'test-secret-key-32-chars-minimum-ok!'
     with app.test_client() as client:
         yield client
 

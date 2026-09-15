@@ -45,6 +45,49 @@ dependencies = [
 [project.urls]
 Source = "https://github.com/idkgarvit/OBSIDIOS"
 
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+exclude = ["__pycache__", ".pytest_cache", "htmlcov"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S"]
+ignore = [
+    "S101",   # asserts in tests
+    "B008",
+    "E701",   # compact `except: pass` guards are idiomatic here
+    "E702",
+    "S110",   # intentional silent guards around optional integrations
+    "S112",
+    "S104",   # 0.0.0.0 bind is intentional inside containers
+    "S105",   # test creds + .env.example placeholders
+    "S603",   # gunicorn/iptables subprocess calls are static argv, no shell
+    "B904",   # guard-rail raises inside broad excepts
+    "E501",   # long SQL/Suricata/HTML strings are more readable un-split
+    "E722",   # bare `except:` guards around optional integrations
+    "S608",   # SQL is static with ? placeholders, no injection
+    "S607",   # subprocess argv uses static binary names (nmap/iptables), no shell
+    "E402",   # deferred imports are deliberate: avoid circular imports
+    "ASYNC221", "ASYNC230", "ASYNC240", "ASYNC110",  # sync IO in CLI/startup paths; async hygiene is incremental
+    "S108",   # /tmp staging paths are operational, not security-sensitive
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = [
+    "ignore::pydantic.PydanticDeprecatedSince20",
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["antibody", "chronicle", "config", "forge", "iris", "oracle", "phantom", "shield", "dashboard"]
+omit = ["*/tests/*", "*/__pycache__/*"]
+
+[tool.coverage.report]
+# Gate is enforced in CI once the baseline is measured there (no cov tooling offline).
+# Start with: --cov-fail-under=<first-green-CI-number>, then ratchet up.
+show_missing = true
+
 [tool.setuptools.packages.find]
 include = [
     "alerts*",

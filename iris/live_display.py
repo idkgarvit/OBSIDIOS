@@ -7,8 +7,8 @@ Uses Rich's Live display — updates every 0.5 seconds.
 """
 from __future__ import annotations
 
-import asyncio
 import time
+
 from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
@@ -170,7 +170,7 @@ class ScanDisplay:
 
     # ── Context manager ────────────────────────────────────────────────────
 
-    def __enter__(self) -> "ScanDisplay":
+    def __enter__(self) -> ScanDisplay:
         self._live = Live(
             self._build_layout(),
             console=console,

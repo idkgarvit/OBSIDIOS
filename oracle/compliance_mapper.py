@@ -12,11 +12,10 @@ Accuracy matters — requirements that can't be verified by scanning are
 marked POLICY_REQUIRED rather than falsely reported as COMPLIANT.
 """
 from __future__ import annotations
+
 from typing import Any
 
-from loguru import logger
 from chronicle import db
-
 
 # verification: scan | partial | policy
 FRAMEWORK_MAPPINGS = {

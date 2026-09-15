@@ -3,9 +3,9 @@ config/network_detector.py
 ──────────────────────────
 Network detection utilities for auto-detecting the current network.
 """
+import ipaddress
 import socket
 import subprocess
-import ipaddress
 from typing import Any
 
 

@@ -10,12 +10,11 @@ Integrates with threat intelligence sources to flag:
 - Reputation scores
 """
 from __future__ import annotations
+
 import time
 from typing import Any
 
-from loguru import logger
 from chronicle import db
-
 
 MOCK_THREAT_DATA = {
     '10.0.0.1': {'reputation': 'suspicious', 'score': 45, 'threats': ['botnet_c2', 'spam'], 'source': 'local_cache'},

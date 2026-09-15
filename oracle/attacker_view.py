@@ -7,9 +7,11 @@ For each open port/service on discovered hosts, shows exactly what
 an attacker would try. No actual exploitation — just the playbook.
 """
 from __future__ import annotations
-import netifaces
+
 from typing import Any
-from loguru import logger
+
+import netifaces
+
 from chronicle import db
 
 # ── Service Attack Playbook ──────────────────────────────────────────────
@@ -278,7 +280,7 @@ async def generate_attacker_view() -> dict[str, Any]:
             })
 
     summary_lines = [
-        f"From an attacker's perspective:",
+        "From an attacker's perspective:",
         f"• {len(hosts)} discoverable hosts",
         f"• {attack_counts['total_techniques']} possible attack techniques identified",
     ]

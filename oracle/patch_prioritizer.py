@@ -7,9 +7,9 @@ Analyzes CVEs + network context (exposed ports, asset value, attack paths)
 to output a prioritized patch order based on ACTUAL network risk, not just CVSS.
 """
 from __future__ import annotations
+
 from typing import Any
 
-from loguru import logger
 from chronicle import db
 
 

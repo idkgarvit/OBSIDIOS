@@ -18,12 +18,10 @@ import os
 import time
 from typing import Any
 
-
 from loguru import logger
 
 from chronicle import db
 from config.settings import ai as ai_cfg
-
 
 # ── Result cache (avoid redundant AI calls on every page load) ──────────────
 _CACHE_TTL = 300  # 5 minutes

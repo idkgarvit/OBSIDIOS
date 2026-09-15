@@ -13,7 +13,6 @@ The output feeds directly into FORGE for Suricata rule generation.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import time
@@ -25,7 +24,6 @@ from loguru import logger
 from chronicle import db
 from chronicle.models import AttackPath, AttackStep
 from iris.graph_builder import get_graph, get_highest_value_targets, get_most_exposed_entries
-
 
 # ── MITRE ATT&CK technique mapping ────────────────────────────────────────────
 # Maps service/port patterns → MITRE technique + tactic
@@ -303,7 +301,6 @@ async def run_simulation(max_paths: int = 10) -> SimulationResult:
 def _print_paths(paths: list[AttackPath]) -> None:
     """Pretty-print attack paths to terminal."""
     from rich.console import Console
-    from rich.table import Table
     console = Console()
 
     console.print("\n[bold red]━━━ PHANTOM: ATTACK PATHS DISCOVERED ━━━[/]\n")

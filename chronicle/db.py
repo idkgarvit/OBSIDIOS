@@ -1,12 +1,13 @@
 import asyncio
-import aiosqlite
-import pathlib
-import time
-from typing import Any, Sequence, Iterable, AsyncGenerator
+from collections.abc import AsyncGenerator, Iterable, Sequence
 from contextlib import asynccontextmanager
+from typing import Any
+
+import aiosqlite
 from loguru import logger
-from config import settings
+
 from chronicle.schema import SCHEMA_SQL
+from config import settings
 
 _read_pool: list[aiosqlite.Connection] = []
 _write_conn: aiosqlite.Connection | None = None
@@ -95,6 +96,20 @@ async def init():
                     await _write_conn.execute(idx_sql)
                 except aiosqlite.OperationalError:
                     pass
+        # Forward-migration hook: ensure schema_version table + stamp current version.
+        # Postgres path must implement the same versions (see chronicle/schema.py).
+        try:
+            async with transaction():
+                await _write_conn.execute(
+                    "CREATE TABLE IF NOT EXISTS schema_version"
+                    " (version INTEGER PRIMARY KEY, applied_at REAL NOT NULL"
+                    " DEFAULT (unixepoch('now','subsec')))")
+                from chronicle.schema import SCHEMA_VERSION
+                await _write_conn.execute(
+                    "INSERT OR IGNORE INTO schema_version (version) VALUES (?)",
+                    (int(SCHEMA_VERSION),))
+        except aiosqlite.OperationalError:
+            pass
 
     for _ in range(8):
         conn = await aiosqlite.connect(db_path, timeout=30.0)
@@ -122,7 +137,7 @@ async def _ensure_clean_txn():
         except: pass
 
 @asynccontextmanager
-async def transaction() -> AsyncGenerator[aiosqlite.Connection, None]:
+async def transaction() -> AsyncGenerator[aiosqlite.Connection]:
     """
     Context manager for a write transaction.
     Acquires the write lock and uses BEGIN IMMEDIATE with retry.
@@ -147,7 +162,7 @@ async def transaction() -> AsyncGenerator[aiosqlite.Connection, None]:
                 try: await _write_conn.rollback()
                 except: pass
                 raise
-            except Exception as e:
+            except Exception:
                 try: await _write_conn.rollback()
                 except: pass
                 raise

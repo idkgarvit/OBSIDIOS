@@ -335,4 +335,15 @@ INSERT OR IGNORE INTO system_settings (key, value) VALUES ('scanner_enabled', '0
 INSERT OR IGNORE INTO system_settings (key, value) VALUES ('target_network', '');
 INSERT OR IGNORE INTO system_settings (key, value) VALUES ('scan_profile', 'FAST');
 INSERT OR IGNORE INTO system_settings (key, value) VALUES ('scan_interface', '');
+
+-- Schema version for forward migrations (Postgres path keeps same version).
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER PRIMARY KEY,
+    applied_at REAL NOT NULL DEFAULT (unixepoch('now','subsec'))
+);
+INSERT OR IGNORE INTO schema_version (version) VALUES (1);
 """
+
+# Current schema revision. Bump + add a migration step in chronicle/db.py
+# when changing SCHEMA_SQL. Postgres migration must replay the same versions.
+SCHEMA_VERSION = 1

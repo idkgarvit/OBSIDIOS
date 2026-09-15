@@ -12,10 +12,10 @@ Composite score 0-100 combining:
 - Exposed services
 """
 from __future__ import annotations
+
 import time
 from typing import Any
 
-from loguru import logger
 from chronicle import db
 
 

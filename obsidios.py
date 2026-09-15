@@ -1,16 +1,26 @@
 """obsidios.py — Main orchestrator + CLI"""
 from __future__ import annotations
-import asyncio, signal, time, json, threading, queue, select, sys, subprocess
+
+import asyncio
+import json
+import queue
+import select
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+import click
+import uvloop
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import click, uvloop
 from loguru import logger
 from rich.console import Console
-from rich.panel import Panel
-from rich.text import Text
-from rich.table import Table
-from rich.live import Live
 from rich.layout import Layout
-
+from rich.live import Live
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from chronicle import db
 from config import settings
@@ -33,18 +43,18 @@ scan_counter = 0
 
 async def scan_cycle(scan_event: asyncio.Event) -> None:
     global scan_counter
-    from iris.wired_scanner import run_scan, run_wireless_scan
+    from forge.rule_generator import run_forge
     from iris.cve_mapper import map_cves_for_scan, persist_cves
     from iris.graph_builder import rebuild_graph
-    from iris.osint_scanner import run_osint_scan
     from iris.nuclei_scanner import run_nuclei_scan
-    from phantom.path_finder import run_simulation
+    from iris.osint_scanner import run_osint_scan
+    from iris.wired_scanner import run_scan, run_wireless_scan
     from oracle.tagnn import run_tagnn_prediction
-    from forge.rule_generator import run_forge
+    from phantom.path_finder import run_simulation
 
     while not _shutdown.is_set():
 
-        from chronicle.db import fetch_val, execute
+        from chronicle.db import execute, fetch_val
 
         try:
             await execute("INSERT OR REPLACE INTO system_settings(key,value) VALUES('scan_phase','Starting scan cycle...')")
@@ -114,8 +124,8 @@ async def scan_cycle(scan_event: asyncio.Event) -> None:
             
             scan_counter += 1
             try:
-                from oracle.claude_client import generate_report
                 from alerts.notifier import send_alert
+                from oracle.claude_client import generate_report
                 report_path = await generate_report()
                 await send_alert(
                     title="📊 Automated Pentest Report Ready",
@@ -192,9 +202,9 @@ async def scan_cycle(scan_event: asyncio.Event) -> None:
 async def run_scheduler():
     """Background worker that manages scheduled scans from dashboard settings."""
     from chronicle.db import fetch_val
-    from iris.wired_scanner import run_scan
     from iris.cve_mapper import map_cves_for_scan, persist_cves
     from iris.graph_builder import rebuild_graph
+    from iris.wired_scanner import run_scan
     
     scheduler = AsyncIOScheduler()
     scheduler.start()
@@ -253,8 +263,8 @@ async def run_scheduler():
 
 async def pulse_loop():
     """High-frequency asset pulse to keep the 3D map updated."""
-    from iris.wired_scanner import fast_host_discovery
     from iris.graph_builder import rebuild_graph
+    from iris.wired_scanner import fast_host_discovery
     while not _shutdown.is_set():
         try:
             await fast_host_discovery()
@@ -280,7 +290,8 @@ async def _run_all(target: str, interval: int) -> None:
     settings.scan.scan_interval_seconds = interval
     # Company-infra startup guards: fail closed in production, warn in dev
     try:
-        from config.settings import validate_prod_config, validate_target_cidr, security as _sec
+        from config.settings import security as _sec
+        from config.settings import validate_prod_config, validate_target_cidr
         prod_errors = validate_prod_config()
         if prod_errors:
             for e in prod_errors:
@@ -305,7 +316,7 @@ async def _run_all(target: str, interval: int) -> None:
     console.print(f"  [bold]Target  :[/] [cyan]{target}[/]")
     console.print(f"  [bold]Interval:[/] [cyan]{interval}s[/]")
     console.print(f"  [bold]Profile :[/] [cyan]{settings.scan.scan_profile}[/]")
-    console.print(f"  [bold]Scanner :[/] [yellow]PAUSED (start from dashboard)[/]")
+    console.print("  [bold]Scanner :[/] [yellow]PAUSED (start from dashboard)[/]")
     console.print()
     if threading.current_thread() is threading.main_thread():
         loop = asyncio.get_running_loop()
@@ -323,12 +334,12 @@ async def _run_all(target: str, interval: int) -> None:
     await db.close()
 
 async def _scan_pipeline(target: str, display=None):
-    from iris.wired_scanner import discover_hosts, scan_hosts_concurrent, _upsert_hosts, _upsert_ports
+    from chronicle.models import Host, Port, ScanResult
     from iris.cve_mapper import map_cves_for_scan, persist_cves
     from iris.graph_builder import rebuild_graph
-    from iris.osint_scanner import run_osint_scan
     from iris.nuclei_scanner import run_nuclei_scan
-    from chronicle.models import ScanResult, Host, Port
+    from iris.osint_scanner import run_osint_scan
+    from iris.wired_scanner import _upsert_hosts, _upsert_ports, discover_hosts, scan_hosts_concurrent
 
     if display: display.start_arp(target)
     arp_hosts = await discover_hosts(target)
@@ -437,7 +448,7 @@ def status():
         blocks = await db.fetch_val('SELECT COUNT(*) FROM shield_actions WHERE is_active=1')
         alerts = 0
 
-        console.print(Panel(Text(f"STRATEGIC HUB STATUS: ONLINE", justify="center", style="bold green"), border_style="green"))
+        console.print(Panel(Text("STRATEGIC HUB STATUS: ONLINE", justify="center", style="bold green"), border_style="green"))
         
         table = Table(title="Tactical Metrics", box=None)
         table.add_column("Metric", style="cyan")
@@ -467,6 +478,7 @@ def status():
 def backup(dest, keep):
     """Online SQLite backup (WAL-safe) + rotation. Safe to run while daemon is live."""
     from pathlib import Path
+
     from chronicle.backup import backup_db
     src = settings.db.db_path
     out = backup_db(src, Path(dest), keep=int(keep))
@@ -479,6 +491,7 @@ def backup(dest, keep):
 def restore(backup_file, force):
     """Restore DB from backup. Current DB is copied to .pre-restore-<ts>.bak first."""
     from pathlib import Path
+
     from chronicle.backup import restore_db
     dest = Path(settings.db.db_path)
     if not force and not click.confirm(f"Restore {backup_file} over {dest}? Current DB will be saved as .bak."):
@@ -605,8 +618,7 @@ def shell(ctx):
             
             parts = cmd_line.split()
             cmd_name = parts[0]
-            cmd_args = parts[1:]
-            
+
             if cmd_name in cli.commands:
                 try:
                     cli.main(args=parts, standalone_mode=False)
@@ -710,9 +722,9 @@ def trigger():
             return
 
         console.print("[bold cyan]Initiating Tactical Intelligence Cycle...")
-        from iris.wired_scanner import run_scan
         from iris.cve_mapper import map_cves_for_scan, persist_cves
         from iris.graph_builder import rebuild_graph
+        from iris.wired_scanner import run_scan
 
         result = await run_scan()
         if result.hosts:
@@ -773,8 +785,8 @@ def start(ctx):
     console.print(Panel("LAUNCHING OBSIDIOS UNIFIED OPERATIONAL MODE", style="bold green"))
     
     def run_engine():
+
         from config import settings
-        import uvloop
         asyncio.run(_run_all(settings.scan.target_network, settings.scan.scan_interval_seconds))
     
     def run_dash():

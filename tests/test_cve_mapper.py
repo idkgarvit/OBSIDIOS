@@ -1,5 +1,5 @@
 """Tests for iris/cve_mapper.py — version parsing and range matching."""
-from iris.cve_mapper import _parse_version, _version_in_range, _cache_key
+from iris.cve_mapper import _cache_key, _parse_version, _version_in_range
 
 
 class TestParseVersion:

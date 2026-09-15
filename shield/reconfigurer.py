@@ -35,7 +35,6 @@ from loguru import logger
 from chronicle import db
 from chronicle.models import ShieldActionType
 
-
 # ── Confidence threshold for autonomous action ─────────────────────────────
 AUTO_ACT_THRESHOLD = 0.85
 ALERT_THRESHOLD    = 0.70
@@ -43,7 +42,8 @@ ALERT_THRESHOLD    = 0.70
 
 def _shield_cfg():
     try:
-        from config.settings import shield_cfg as _c, parse_shield_allowlist, is_ip_allowlisted
+        from config.settings import is_ip_allowlisted, parse_shield_allowlist
+        from config.settings import shield_cfg as _c
         return _c, parse_shield_allowlist, is_ip_allowlisted
     except Exception:
         return None, None, None
@@ -51,7 +51,8 @@ def _shield_cfg():
 
 async def _shield_guard(target_ip: str, action: str) -> tuple[bool, str]:
     """Company safety: dry-run, allowlist, rate-limit. Returns (allowed, reason)."""
-    import os, time as _t
+    import os
+    import time as _t
     cfg, parse_fn, match_fn = _shield_cfg()
     dry = os.environ.get("SHIELD_DRY_RUN", "1").strip().lower() in ("1", "true", "yes")
     if cfg is not None:
@@ -301,7 +302,6 @@ async def quarantine_host(
     if not allowed:
         logger.warning(f"[SHIELD] Guard refused QUARANTINE {ip}: {reason}")
         return {"status": "refused", "ip": ip, "reason": reason}
-    results = []
 
     # Block inbound
     ok1, _ = await _run_iptables(["-A", "INPUT",  "-s", ip, "-j", "DROP"])
@@ -323,7 +323,8 @@ async def quarantine_host(
                 trigger_type, trigger_id, confidence, justification,
             ),
         )
-        logger.success(f"[SHIELD] HOST QUARANTINED: {ip}")
+        action_id = row["id"] if row else None
+        logger.success(f"[SHIELD] HOST QUARANTINED: {ip} (action_id={action_id})")
 
     return {"status": "quarantined" if success else "failed", "ip": ip}
 
@@ -343,7 +344,6 @@ async def revert_action(action_id: int, reverted_by: str = "HUMAN") -> bool:
     rule    = row["rule_applied"]
     action  = row["action_type"]
     target  = row["target_ip"]
-    port    = row["target_port"]
 
     # Build revert command (replace -A with -D to delete)
     if action == str(ShieldActionType.BLOCK_IP):

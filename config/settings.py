@@ -3,7 +3,9 @@ config/settings.py
 Central configuration for OBSIDIOS.
 """
 from __future__ import annotations
+
 from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -155,7 +157,7 @@ _WEAK_SECRETS = {"", "changeme", "obsidios-secret-fallback-for-dev", "obsidios12
 
 def validate_prod_config() -> list[str]:
     """Returns list of blocking errors when OBSIDIOS_ENV=production. Empty = OK."""
-    import os, ipaddress
+    import os
     errors: list[str] = []
     # Source of truth: env var (not cached pydantic object)
     if os.environ.get("OBSIDIOS_ENV", "dev").strip().lower() not in ("prod", "production"):
@@ -182,7 +184,8 @@ def validate_prod_config() -> list[str]:
 
 def validate_target_cidr(cidr: str) -> tuple[bool, str]:
     """Guardrails: deny 0.0.0.0/0, overly broad </8, and public ranges without explicit opt-in."""
-    import ipaddress, os
+    import ipaddress
+    import os
     if not cidr:
         return False, "empty — set OBSIDIOS_TARGET to a company-owned private CIDR"
     try:

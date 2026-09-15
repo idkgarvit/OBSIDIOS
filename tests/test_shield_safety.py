@@ -1,10 +1,10 @@
 """SHIELD safety tests — dry-run default, allowlist, validation. No iptables touched."""
 import asyncio
-import os
+
 import pytest
 
-from shield import reconfigurer as sh
 from config.settings import is_ip_allowlisted
+from shield import reconfigurer as sh
 
 
 class FakeDB:
@@ -50,7 +50,7 @@ def test_allowlist_blocks_gateway(monkeypatch):
     monkeypatch.setenv("OBSIDIOS_GATEWAY", "192.168.1.1")
 
     async def fake_guard(ip, action):
-        from config.settings import parse_shield_allowlist, is_ip_allowlisted
+        from config.settings import is_ip_allowlisted, parse_shield_allowlist
         allow = parse_shield_allowlist("192.168.1.1")
         if is_ip_allowlisted(ip, allow):
             return False, "Allowlisted"

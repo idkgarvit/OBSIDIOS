@@ -1,8 +1,13 @@
 """Tests for iris/graph_builder.py — pure function tests."""
 import networkx as nx
+
 from iris.graph_builder import (
-    _compute_risk, _build_edges, export_for_dashboard,
-    get_highest_value_targets, get_most_exposed_entries, apply_shield_block,
+    _build_edges,
+    _compute_risk,
+    apply_shield_block,
+    export_for_dashboard,
+    get_highest_value_targets,
+    get_most_exposed_entries,
 )
 
 

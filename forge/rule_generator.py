@@ -28,15 +28,13 @@ Rule generation strategy per MITRE technique:
 """
 from __future__ import annotations
 
-import asyncio
 import time
 
 from loguru import logger
 
 from chronicle import db
 from chronicle.models import ForgeRule
-from phantom.path_finder import SimulationResult, AttackStep
-
+from phantom.path_finder import AttackStep, SimulationResult
 
 # ── SID counter (Suricata rule IDs must be unique) ─────────────────────────
 # OBSIDIOS uses SID range 9000000–9999999 to avoid conflicts with
@@ -422,10 +420,10 @@ def _format_rules_by_category(rules: list[dict]) -> str:
     rule_num = 1
     for cat, cat_rules in sorted(by_cat.items()):
         desc = cat_descriptions.get(cat, cat)
-        output += f"# ══════════════════════════════════════════════════════════\n"
+        output += "# ══════════════════════════════════════════════════════════\n"
         output += f"# [{cat}] — {desc}\n"
         output += f"# {len(cat_rules)} rules in this category\n"
-        output += f"# ══════════════════════════════════════════════════════════\n\n"
+        output += "# ══════════════════════════════════════════════════════════\n\n"
         for r in cat_rules:
             output += f"# Rule {rule_num:03d} | SID:{r.get('rule_sid','?')} | {r.get('mitre_technique','?')}\n"
             output += r["rule_text"] + "\n\n"
@@ -571,5 +569,5 @@ def _print_rules_summary(rules: list[ForgeRule]) -> None:
         color = cat_colors.get(cat, "white")
         console.print(f"  [{color}]{cat:<20}[/] {count} rules")
 
-    console.print(f"\n  [dim]Rules file: reports/output/obsidios.rules[/]")
-    console.print(f"  [dim]All rules stored in CHRONICLE → forge_rules table[/]\n")
+    console.print("\n  [dim]Rules file: reports/output/obsidios.rules[/]")
+    console.print("  [dim]All rules stored in CHRONICLE → forge_rules table[/]\n")

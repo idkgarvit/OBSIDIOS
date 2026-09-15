@@ -85,7 +85,7 @@ class PacketCollector:
         """Process one packet — update counters for src and dst hosts."""
         try:
             # Import here to avoid Scapy loading at module level
-            from scapy.all import IP, TCP, UDP, DNS, DNSQR
+            from scapy.all import DNS, DNSQR, IP, TCP, UDP
 
             if not pkt.haslayer(IP):
                 return
@@ -472,7 +472,7 @@ async def run_echo(
     from rich.console import Console
     console = Console()
 
-    console.print(f"[bold cyan]👁  ECHO — Behavioral Monitor[/]")
+    console.print("[bold cyan]👁  ECHO — Behavioral Monitor[/]")
     console.print(f"  Interface : [yellow]{iface}[/]")
     console.print(f"  Network   : [yellow]{network}[/]")
     console.print(f"  Duration  : [yellow]{duration_minutes} min[/]\n")

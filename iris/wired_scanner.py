@@ -3,17 +3,28 @@ iris/wired_scanner.py
 IRIS wired network discovery: Dual-mode (Scapy + Nmap) aggressive discovery.
 """
 from __future__ import annotations
-import asyncio, time, ipaddress, netifaces
-from concurrent.futures import ThreadPoolExecutor
+
+import asyncio
+import ipaddress
 import logging
+import re
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import netifaces
+
 logging.getLogger("scapy.runtime").setLevel(logging.ERROR)
-from scapy.all import ARP, Ether, srp, conf as scapy_conf
+from scapy.all import ARP, Ether, srp
+from scapy.all import conf as scapy_conf
+
 scapy_conf.verb = 0
 import nmap
 from loguru import logger
+
 from chronicle import db
 from chronicle.models import Host, Port, ScanResult
 from config.settings import scan as scan_cfg
+
 
 async def get_target_from_db() -> str:
     try:
@@ -280,7 +291,10 @@ def _scan_wireless_clients(iface: str) -> list[dict]:
 
 
 async def run_wireless_scan():
-    import subprocess, re, time
+    import re
+    import subprocess
+    import time
+
     from chronicle import db
     from config.settings import scan as scan_cfg
     if not scan_cfg.enable_wireless:
@@ -355,7 +369,7 @@ async def run_wireless_scan():
             logger.info(f"[WIRELESS] Found {len(clients)} client device(s) on {iface}")
 
     except FileNotFoundError:
-        logger.warning(f"[WIRELESS] `iw` not found — no wireless scanning available")
+        logger.warning("[WIRELESS] `iw` not found — no wireless scanning available")
     except subprocess.TimeoutExpired:
         logger.warning(f"[WIRELESS] Scan timed out on {iface}")
     except Exception as e:

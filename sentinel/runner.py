@@ -6,6 +6,7 @@ cross-references with PHANTOM attack paths, writes to sentinel_alerts,
 and triggers SHIELD auto-response.
 """
 from __future__ import annotations
+
 import asyncio
 import json
 import os
@@ -13,10 +14,10 @@ import pathlib
 import signal
 import subprocess
 import time
+
 from loguru import logger
 
 from chronicle import db
-
 
 # ── Constants ──────────────────────────────────────────────────────────────
 POLL_INTERVAL = 0.5  # seconds between eve.json polls
@@ -142,7 +143,7 @@ async def _tail_eve(eve_path: str, shutdown_event: asyncio.Event) -> None:
             return
 
     # Seek to end to avoid re-processing old alerts
-    with open(eve_path, "r") as f:
+    with open(eve_path) as f:
         f.seek(0, os.SEEK_END)
         while not shutdown_event.is_set():
             line = f.readline()
@@ -201,7 +202,7 @@ async def _process_alert(line: str) -> None:
         f"\"{alert['message'][:60]}\""
     )
 
-    from alerts.notifier import send_alert, check_cooldown
+    from alerts.notifier import check_cooldown, send_alert
     mitre = alert.get("mitre_technique", "")
     cooldown_key = f"sentinel:{alert['src_ip']}→{alert['dst_ip']}"
     if not check_cooldown(cooldown_key, 60):
@@ -298,7 +299,7 @@ async def _monitor_suricata(
                 msg = line.decode(errors="replace").strip()
                 if msg:
                     logger.debug(f"[SURICATA] {msg}")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Check if process is still alive
             if proc.returncode is not None:
                 logger.warning(
@@ -362,7 +363,7 @@ async def start_sentinel(
         tailer_task = asyncio.create_task(_tail_eve(eve_path, shutdown_event))
 
         # Monitor Suricata
-        result = await _monitor_suricata(proc, shutdown_event)
+        await _monitor_suricata(proc, shutdown_event)
         tailer_task.cancel()
         try:
             await tailer_task
@@ -382,7 +383,7 @@ async def start_sentinel(
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=SHUTDOWN_WAIT)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             await proc.wait()
 

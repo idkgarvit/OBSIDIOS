@@ -7,38 +7,52 @@ on:
     branches: [main]
 
 jobs:
-  lint:
+  lint-test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest
-      - name: Check syntax
+          pip install pytest pytest-cov ruff pip-audit
+      - name: Ruff lint
+        run: ruff check .
+      - name: Syntax check
         run: |
           python3 -m py_compile obsidios.py
           python3 -m py_compile config/settings.py
           python3 -m py_compile chronicle/db.py
           python3 -m py_compile chronicle/schema.py
-          for f in iris/*.py oracle/*.py phantom/*.py forge/*.py sentinel/*.py shield/*.py echo/*.py dashboard/*.py alerts/*.py; do
+          python3 -m py_compile chronicle/backup.py
+          for f in iris/*.py oracle/*.py phantom/*.py forge/*.py sentinel/*.py shield/*.py echo/*.py dashboard/*.py alerts/*.py antibody/*.py; do
             python3 -m py_compile "$f"
           done
-      - name: Run tests
-        run: |
-          python3 -m pytest tests/ -v --tb=short
+      - name: Run tests with coverage report
+        # First green runs establish the baseline; then pin --cov-fail-under=<baseline>
+        run: python3 -m pytest tests/ -q --cov --cov-report=term-missing
+      - name: Dependency audit
+        run: python3 -m pip_audit --desc || pip-audit --desc
+        continue-on-error: true
 
   docker:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Build Docker image
-        run: |
-          docker build -t obsidios --no-cache .
+        run: docker build -t obsidios --no-cache .
       - name: Verify container starts
-        run: |
-          docker run --rm obsidios python3 obsidios.py --help
+        run: docker run --rm obsidios python3 obsidios.py --help
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: "0"

@@ -1,20 +1,21 @@
 import asyncio
+import concurrent.futures
 import csv
+import datetime
 import io
 import json
-import socket
-import time
 import os
+import socket
 import threading
-import concurrent.futures
-import jwt
-import datetime
+import time
 from functools import wraps
 
-from flask import Flask, render_template, jsonify, request, Response
+import jwt
+from flask import Flask, Response, jsonify, render_template, request
 from flask_socketio import SocketIO
-from dashboard import db_sync as db
 from loguru import logger
+
+from dashboard import db_sync as db
 
 # Background event loop daemon — one loop reused across all requests
 _bg_loop: asyncio.AbstractEventLoop | None = None
@@ -166,7 +167,7 @@ def check_auth(username, password) -> str | None:
 
 def _issue_tokens(username: str, role: str) -> dict:
     import secrets
-    now = datetime.datetime.now(datetime.timezone.utc)
+    now = datetime.datetime.now(datetime.UTC)
     access_jti = secrets.token_hex(16)
     refresh_jti = secrets.token_hex(16)
     access = jwt.encode(
@@ -241,6 +242,49 @@ def rate_limit(f):
 def health():
     """Unauthenticated liveness probe for Docker/K8s. No DB dependency."""
     return jsonify({'status': 'ok', 'service': 'obsidios-dash'}), 200
+
+
+@app.route('/api/readyz', methods=['GET'])
+def readyz():
+    """Readiness probe: liveness + DB reachable. 200 ready, 503 not ready."""
+    try:
+        db.fetch_val('SELECT 1', default=None)
+        return jsonify({'status': 'ready', 'service': 'obsidios-dash'}), 200
+    except Exception as e:
+        return jsonify({'status': 'not-ready', 'error': str(e)[:200]}), 503
+
+
+@app.route('/metrics', methods=['GET'])
+def metrics():
+    """Prometheus exposition (no auth — scrape via private network only)."""
+    try:
+        hosts = db.fetch_val('SELECT COUNT(*) FROM hosts WHERE is_active=1', default=0) or 0
+        ports = db.fetch_val('SELECT COUNT(*) FROM ports WHERE state="open"', default=0) or 0
+        cves = db.fetch_val('SELECT COUNT(*) FROM cves', default=0) or 0
+        paths = db.fetch_val('SELECT COUNT(*) FROM attack_paths WHERE is_active=1', default=0) or 0
+        blocks = db.fetch_val('SELECT COUNT(*) FROM shield_actions WHERE is_active=1', default=0) or 0
+        posture = 0.0
+        try:
+            posture = float(sync_calculate_global_posture() or 0)
+        except Exception:
+            pass
+        body = (
+            "# HELP obsidios_hosts_active Active hosts\n# TYPE obsidios_hosts_active gauge\n"
+            f"obsidios_hosts_active {hosts}\n"
+            "# HELP obsidios_open_ports Open ports\n# TYPE obsidios_open_ports gauge\n"
+            f"obsidios_open_ports {ports}\n"
+            "# HELP obsidios_cves_total CVEs\n# TYPE obsidios_cves_total gauge\n"
+            f"obsidios_cves_total {cves}\n"
+            "# HELP obsidios_attack_paths_active Active attack paths\n# TYPE obsidios_attack_paths_active gauge\n"
+            f"obsidios_attack_paths_active {paths}\n"
+            "# HELP obsidios_shield_blocks_active Active SHIELD blocks\n# TYPE obsidios_shield_blocks_active gauge\n"
+            f"obsidios_shield_blocks_active {blocks}\n"
+            "# HELP obsidios_posture_score Global posture 0-100\n# TYPE obsidios_posture_score gauge\n"
+            f"obsidios_posture_score {posture}\n"
+        )
+        return Response(body, mimetype='text/plain; version=0.0.4')
+    except Exception as e:
+        return Response(f"# error {e}\n", mimetype='text/plain', status=503)
 
 
 def _do_login():
@@ -582,6 +626,7 @@ def api_shield_actions():
 def api_shield_revert(aid):
     try:
         from flask import g
+
         # Actually remove the iptables rule, not just the DB flag.
         from shield.reconfigurer import revert_action
         ok = run_async(revert_action(aid, reverted_by=getattr(g, 'user', 'HUMAN')), timeout=30)
@@ -1073,7 +1118,7 @@ def api_ai_brief():
         except Exception as e:
             last_err = e
             if 'database is locked' in str(e) and attempt == 0:
-                logger.warning(f'[DASHBOARD] AI brief DB locked, retrying...')
+                logger.warning('[DASHBOARD] AI brief DB locked, retrying...')
                 time.sleep(1)
                 continue
             break

@@ -1168,14 +1168,15 @@ omnibar.input&&(omnibar.input.oninput=function(){omnibar.search(this.value)});
 /* ── DONUT CLICK ── */
 document.getElementById('donut')?.addEventListener('click', () => updateStats());
 
-/* ── AUTH ── */
+/* ── AUTH (15-min access + 7-day refresh) ── */
+let jwtRefresh = localStorage.getItem('obsidios_refresh') || '';
 function authHeader() { return jwtToken ? { 'Authorization': 'Bearer ' + jwtToken } : {}; }
 
 async function performLogin() {
   const u = document.getElementById('login-username').value;
   const p = document.getElementById('login-password').value;
   try {
-    const res = await fetch('/api/login', {
+    const res = await fetch('/api/v2/login', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({username: u, password: p})
@@ -1183,7 +1184,10 @@ async function performLogin() {
     if (res.ok) {
       const data = await res.json();
       jwtToken = data.token;
+      jwtRefresh = data.refresh_token || '';
       localStorage.setItem('obsidios_jwt', jwtToken);
+      if (jwtRefresh) localStorage.setItem('obsidios_refresh', jwtRefresh);
+      scheduleRefresh(data.expires_in || 900);
       document.getElementById('login-modal').style.display = 'none';
       initDashboard();
     } else {
@@ -1195,10 +1199,59 @@ async function performLogin() {
   }
 }
 
+let _refreshTimer = null;
+function scheduleRefresh(expiresIn) {
+  if (_refreshTimer) clearTimeout(_refreshTimer);
+  const waitMs = Math.max((expiresIn - 60) * 1000, 30000);
+  _refreshTimer = setTimeout(refreshToken, waitMs);
+}
+
+async function refreshToken() {
+  if (!jwtRefresh) return false;
+  try {
+    const res = await fetch('/api/v2/refresh', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({refresh_token: jwtRefresh})
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    jwtToken = data.token;
+    jwtRefresh = data.refresh_token || jwtRefresh;
+    localStorage.setItem('obsidios_jwt', jwtToken);
+    localStorage.setItem('obsidios_refresh', jwtRefresh);
+    scheduleRefresh(data.expires_in || 900);
+    return true;
+  } catch(e) { return false; }
+}
+
+// Wrap fetch to auto-refresh once on 401 caused by expiry
+const _origFetch = window.fetch.bind(window);
+window.fetch = async function(url, opts) {
+  let res = await _origFetch(url, opts);
+  const noRetry = typeof url === 'string' && (url.includes('/api/v2/refresh') || url.includes('/api/v2/login'));
+  if (res.status === 401 && jwtRefresh && !noRetry && typeof url === 'string' && url.startsWith('/api/')) {
+    if (await refreshToken()) {
+      opts = opts || {};
+      opts.headers = Object.assign({}, opts.headers, authHeader());
+      res = await _origFetch(url, opts);
+    } else {
+      jwtToken = null; jwtRefresh = '';
+      localStorage.removeItem('obsidios_jwt'); localStorage.removeItem('obsidios_refresh');
+    }
+  }
+  return res;
+};
+
 function checkLogin() {
   if (jwtToken) {
     document.getElementById('login-modal').style.display = 'none';
+    scheduleRefresh(900);
     initDashboard();
+  } else if (jwtRefresh) {
+    refreshToken().then(ok => {
+      if (ok) { document.getElementById('login-modal').style.display = 'none'; initDashboard(); }
+    });
   }
 }
 

@@ -1,10 +1,14 @@
 """iris/heartbeat.py — Ultra-fast ARP heartbeat loop"""
 from __future__ import annotations
+
 import asyncio
 import time
+
 from loguru import logger
+
 from chronicle import db
 from iris.wired_scanner import _arp_sweep
+
 
 async def run_heartbeat_loop(target: str, socketio=None):
     """

@@ -1,9 +1,15 @@
 """iris/cve_mapper.py — Enhanced NVD API v2 Mapper with CPE support + version verification"""
 from __future__ import annotations
-import asyncio, hashlib, re, time
+
+import asyncio
+import hashlib
+import re
+import time
 from collections import OrderedDict
+
 import aiohttp
 from loguru import logger
+
 from chronicle import db
 from chronicle.models import CVE, Severity
 
@@ -143,7 +149,7 @@ def _normalize_service(svc: str) -> str:
     return re.sub(r'[?*#].*$', '', svc).strip().lower()
 
 def _cache_key(service, version, cpe):
-    return hashlib.md5(f"{service}:{version or ''}:{cpe or ''}".encode()).hexdigest()
+    return hashlib.md5(f"{service}:{version or ''}:{cpe or ''}".encode(), usedforsecurity=False).hexdigest()  # non-security cache key
 
 # ── Version Parsing & Comparison ──────────────────────────────────────────
 
@@ -459,7 +465,7 @@ async def map_cves_for_scan(scan_result, api_key=None) -> tuple[dict[str, list[C
     if skipped_generic:
         logger.info(f"[IRIS/CVE] Skipped {skipped_generic} ports (generic/no-product)")
     if not unique:
-        logger.warning(f"[IRIS/CVE] No unique service+product combinations to query — all ports filtered out")
+        logger.warning("[IRIS/CVE] No unique service+product combinations to query — all ports filtered out")
         return result_map, affected_map
     logger.info(f"[IRIS/CVE] Querying {len(unique)} unique service+product combo(s) for CVEs")
     connector = aiohttp.TCPConnector(limit=10)

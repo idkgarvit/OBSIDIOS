@@ -1,9 +1,8 @@
 """Tests for hardened auth: short-lived access, refresh rotation, logout, RBAC."""
 import json
-import os
+
 import pytest
 
-from dashboard import app as appmod
 from dashboard.app import app
 
 
