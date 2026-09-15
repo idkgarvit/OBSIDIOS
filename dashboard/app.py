@@ -716,6 +716,45 @@ def api_forge_deploy(rid):
         return jsonify({'status': 'success', 'is_deployed': bool(new_val)})
     except Exception as e: return jsonify({'error': str(e)}), 500
 
+@app.route('/api/v2/forge/feedback', methods=['POST'])
+@requires_auth
+def api_forge_feedback():
+    """Record TP/FP verdict -> bump counters, store feedback, return suggestion."""
+    try:
+        data = request.get_json(silent=True) or {}
+        rule_id = data.get('rule_id') or data.get('forge_rule_id') or data.get('id')
+        verdict = data.get('verdict', '')
+        if not rule_id:
+            return jsonify({'error': 'rule_id required'}), 400
+        if not verdict:
+            return jsonify({'error': 'verdict required (tp/fp)'}), 400
+        from antibody.service import record_feedback
+        result = run_async(record_feedback(
+            forge_rule_id=int(rule_id),
+            verdict=str(verdict),
+            note=str(data.get('note', '') or ''),
+            sentinel_alert_id=data.get('sentinel_alert_id'),
+            attack_path_id=data.get('attack_path_id'),
+            auto_apply=bool(data.get('auto_apply', False)),
+        ), timeout=30)
+        return jsonify(result)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except LookupError as e:
+        return jsonify({'error': str(e)}), 404
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/v2/forge/suggestions')
+@requires_auth
+def api_forge_suggestions():
+    """List auto-tune suggestions for noisy/reliable rules."""
+    try:
+        from antibody.service import list_suggestions
+        suggestions = run_async(list_suggestions(), timeout=30)
+        return jsonify({'data': suggestions, 'count': len(suggestions)})
+    except Exception as e: return jsonify({'error': str(e)}), 500
+
 @app.route('/api/v2/cves/exploit_status')
 @requires_auth
 def api_cve_exploit_status():
