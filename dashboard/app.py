@@ -123,28 +123,103 @@ def _is_locked_out(ip: str) -> bool:
 def _record_login_fail(ip: str) -> None:
     _LOGIN_FAILS.setdefault(ip, []).append(time.time())
 
-def check_auth(username, password):
-    expected_user = os.environ.get('DASHBOARD_USER', 'admin')
-    expected_pass = os.environ.get('DASHBOARD_PASS', 'obsidios123')
-    return username == expected_user and password == expected_pass
+ACCESS_TTL_SECONDS = 900  # 15 min
+REFRESH_TTL_SECONDS = 7 * 24 * 3600  # 7 days
+_REVOKED_JTIS: dict[str, float] = {}  # jti -> exp (in-memory denylist)
+
+_WEAK_PASSWORDS = {"", "obsidios123", "admin", "password", "changeme", "change-me-immediately"}
+
+
+def _is_production() -> bool:
+    return os.environ.get('OBSIDIOS_ENV', 'dev').strip().lower() in ('prod', 'production')
+
+
+def _operator_creds() -> tuple[str, str]:
+    user = os.environ.get('DASHBOARD_USER', 'admin')
+    pw = os.environ.get('DASHBOARD_PASS', '')
+    if not pw and not _is_production():
+        pw = 'obsidios123'  # dev-only fallback; prod fails closed (see below)
+    return user, pw
+
+
+def _viewer_creds() -> tuple[str, str] | None:
+    user = os.environ.get('VIEWER_USER', '').strip()
+    pw = os.environ.get('VIEWER_PASS', '').strip()
+    if user and pw:
+        return user, pw
+    return None
+
+
+def check_auth(username, password) -> str | None:
+    """Validate credentials. Returns role ('operator'/'viewer') or None."""
+    import hmac
+    ou, op = _operator_creds()
+    if username == ou and op and hmac.compare_digest(str(password), str(op)):
+        if _is_production() and (not op or op in _WEAK_PASSWORDS):
+            return None  # fail closed in prod even if env default leaked
+        return 'operator'
+    vc = _viewer_creds()
+    if vc and username == vc[0] and hmac.compare_digest(str(password), str(vc[1])):
+        return 'viewer'
+    return None
+
+
+def _issue_tokens(username: str, role: str) -> dict:
+    import secrets
+    now = datetime.datetime.now(datetime.timezone.utc)
+    access_jti = secrets.token_hex(16)
+    refresh_jti = secrets.token_hex(16)
+    access = jwt.encode(
+        {'user': username, 'role': role, 'iss': 'obsidios', 'type': 'access',
+         'jti': access_jti, 'exp': now + datetime.timedelta(seconds=ACCESS_TTL_SECONDS)},
+        app.config['SECRET_KEY'], algorithm='HS256')
+    refresh = jwt.encode(
+        {'user': username, 'role': role, 'iss': 'obsidios', 'type': 'refresh',
+         'jti': refresh_jti, 'exp': now + datetime.timedelta(seconds=REFRESH_TTL_SECONDS)},
+        app.config['SECRET_KEY'], algorithm='HS256')
+    return {'token': access, 'refresh_token': refresh, 'role': role,
+            'expires_in': ACCESS_TTL_SECONDS, 'refresh_expires_in': REFRESH_TTL_SECONDS}
+
+
+def _decode_token(raw: str) -> dict:
+    payload = jwt.decode(raw, app.config['SECRET_KEY'], algorithms=['HS256'],
+                         options={'require': ['exp']})
+    if payload.get('iss') is not None and payload.get('iss') != 'obsidios':
+        raise ValueError('bad issuer')
+    jti = payload.get('jti', '')
+    if jti and jti in _REVOKED_JTIS:
+        raise ValueError('revoked')
+    return payload
 
 
 def requires_auth(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        from flask import g
         token = request.headers.get('Authorization')
         if not token or not token.startswith('Bearer '):
             return jsonify({'error': 'Token is missing'}), 401
         try:
-            payload = jwt.decode(token.split(' ')[1], app.config['SECRET_KEY'], algorithms=['HS256'], options={'require': ['exp']})
-            # Enforce issuer when present (company deployments set iss=obsidios)
-            iss = payload.get('iss')
-            if iss is not None and iss != 'obsidios':
+            payload = _decode_token(token.split(' ', 1)[1])
+            if payload.get('type', 'access') != 'access':
                 return jsonify({'error': 'Token is invalid'}), 401
+            g.user = payload.get('user', '')
+            g.role = payload.get('role', 'operator')  # legacy 4h tokens pre-date roles
         except jwt.ExpiredSignatureError:
             return jsonify({'error': 'Token expired'}), 401
         except Exception:
             return jsonify({'error': 'Token is invalid'}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+
+def requires_operator(f):
+    @wraps(f)
+    @requires_auth
+    def decorated(*args, **kwargs):
+        from flask import g
+        if getattr(g, 'role', '') != 'operator':
+            return jsonify({'error': 'Operator role required'}), 403
         return f(*args, **kwargs)
     return decorated
 
@@ -168,9 +243,7 @@ def health():
     return jsonify({'status': 'ok', 'service': 'obsidios-dash'}), 200
 
 
-@app.route('/api/login', methods=['POST'])
-@rate_limit
-def login():
+def _do_login():
     import hmac
     client_ip = request.remote_addr or 'unknown'
     if _is_locked_out(client_ip):
@@ -178,23 +251,86 @@ def login():
     data = request.get_json(silent=True) or {}
     if not data.get('username') or not data.get('password'):
         return jsonify({'error': 'Missing credentials'}), 400
-    if check_auth(data['username'], data['password']):
+    role = check_auth(data['username'], data['password'])
+    if role:
         _LOGIN_FAILS.pop(client_ip, None)
-        # 4h expiry for company use (was 24h). Includes iss for validation.
-        exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=4)
-        token = jwt.encode({'user': data['username'], 'iss': 'obsidios', 'exp': exp}, app.config['SECRET_KEY'], algorithm='HS256')
+        tokens = _issue_tokens(data['username'], role)
         try:
             from dashboard import db_sync as _db
             _db.execute("INSERT INTO system_settings(key,value) VALUES('last_login_'+?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (data['username'], str(time.time())))
         except Exception:
             pass
-        logger.info(f"[AUTH] Login success user={data['username']} ip={client_ip}")
-        return jsonify({'token': token, 'expires_in': 14400})
+        logger.info(f"[AUTH] Login success user={data['username']} role={role} ip={client_ip}")
+        return jsonify(tokens)
     _record_login_fail(client_ip)
     # Constant-time-ish response to avoid user enumeration timing leaks
     hmac.compare_digest(data.get('username', ''), 'x' * len(data.get('username', '')))
     logger.warning(f"[AUTH] Login failed user={data.get('username')} ip={client_ip}")
     return jsonify({'error': 'Invalid credentials'}), 401
+
+
+@app.route('/api/login', methods=['POST'])
+@rate_limit
+def login():
+    """Legacy login — kept for dashboard JS compat. Returns short-lived access + refresh."""
+    return _do_login()
+
+
+@app.route('/api/v2/login', methods=['POST'])
+@rate_limit
+def login_v2():
+    return _do_login()
+
+
+@app.route('/api/v2/refresh', methods=['POST'])
+@rate_limit
+def refresh():
+    import secrets
+    data = request.get_json(silent=True) or {}
+    raw = data.get('refresh_token', '')
+    if not raw:
+        return jsonify({'error': 'refresh_token required'}), 400
+    try:
+        payload = _decode_token(raw)
+        if payload.get('type') != 'refresh':
+            return jsonify({'error': 'Token is invalid'}), 401
+        # Rotate: revoke old refresh jti
+        old_jti = payload.get('jti', '') or secrets.token_hex(8)
+        _REVOKED_JTIS[old_jti] = float(payload.get('exp', time.time() + 60))
+        tokens = _issue_tokens(payload.get('user', ''), payload.get('role', 'operator'))
+        return jsonify(tokens)
+    except jwt.ExpiredSignatureError:
+        return jsonify({'error': 'Token expired'}), 401
+    except Exception:
+        return jsonify({'error': 'Token is invalid'}), 401
+
+
+@app.route('/api/v2/logout', methods=['POST'])
+@requires_auth
+def logout():
+    from flask import g
+    token = (request.headers.get('Authorization', '') or '')
+    raw = token.split(' ', 1)[1] if ' ' in token else ''
+    try:
+        payload = jwt.decode(raw, app.config['SECRET_KEY'], algorithms=['HS256'],
+                             options={'verify_exp': False})
+        jti = payload.get('jti', '')
+        if jti:
+            _REVOKED_JTIS[jti] = float(payload.get('exp', time.time() + 60))
+        data = request.get_json(silent=True) or {}
+        rraw = data.get('refresh_token', '')
+        if rraw:
+            try:
+                rp = jwt.decode(rraw, app.config['SECRET_KEY'], algorithms=['HS256'],
+                                options={'verify_exp': False})
+                if rp.get('jti'):
+                    _REVOKED_JTIS[rp['jti']] = float(rp.get('exp', time.time() + 60))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    logger.info(f"[AUTH] Logout user={getattr(g, 'user', '')}")
+    return jsonify({'status': 'success'})
 
 
 def sync_calculate_global_posture():
@@ -442,11 +578,19 @@ def api_shield_actions():
     except Exception as e: return jsonify({'error': str(e)}), 500
 
 @app.route('/api/v2/shield/revert/<int:aid>', methods=['POST'])
-@requires_auth
+@requires_operator
 def api_shield_revert(aid):
     try:
+        from flask import g
+        # Actually remove the iptables rule, not just the DB flag.
+        from shield.reconfigurer import revert_action
+        ok = run_async(revert_action(aid, reverted_by=getattr(g, 'user', 'HUMAN')), timeout=30)
+        if ok:
+            return jsonify({'status': 'success'})
+        # Fallback: mark inactive so a failed iptables -D doesn't leave a live row
+        # hidden as active. The rule itself may already be gone.
         db.execute('UPDATE shield_actions SET is_active=0, reverted_at=? WHERE id=?', (time.time(), aid))
-        return jsonify({'status': 'success'})
+        return jsonify({'status': 'success', 'warning': 'iptables revert failed, DB flag cleared'})
     except Exception as e: return jsonify({'error': str(e)}), 500
 
 @app.route('/api/v2/config/detect-network')
@@ -706,7 +850,7 @@ def api_forge_rules():
     except Exception as e: return jsonify({'error': str(e)}), 500
 
 @app.route('/api/v2/forge/deploy/<int:rid>', methods=['POST'])
-@requires_auth
+@requires_operator
 def api_forge_deploy(rid):
     try:
         rule = db.fetch_one('SELECT is_deployed FROM forge_rules WHERE id=?', (rid,))
@@ -721,6 +865,7 @@ def api_forge_deploy(rid):
 def api_forge_feedback():
     """Record TP/FP verdict -> bump counters, store feedback, return suggestion."""
     try:
+        from flask import g
         data = request.get_json(silent=True) or {}
         rule_id = data.get('rule_id') or data.get('forge_rule_id') or data.get('id')
         verdict = data.get('verdict', '')
@@ -728,6 +873,9 @@ def api_forge_feedback():
             return jsonify({'error': 'rule_id required'}), 400
         if not verdict:
             return jsonify({'error': 'verdict required (tp/fp)'}), 400
+        auto_apply = bool(data.get('auto_apply', False))
+        if auto_apply and getattr(g, 'role', '') != 'operator':
+            return jsonify({'error': 'Operator role required for auto_apply'}), 403
         from antibody.service import record_feedback
         result = run_async(record_feedback(
             forge_rule_id=int(rule_id),
@@ -735,7 +883,7 @@ def api_forge_feedback():
             note=str(data.get('note', '') or ''),
             sentinel_alert_id=data.get('sentinel_alert_id'),
             attack_path_id=data.get('attack_path_id'),
-            auto_apply=bool(data.get('auto_apply', False)),
+            auto_apply=auto_apply,
         ), timeout=30)
         return jsonify(result)
     except ValueError as e:

@@ -383,6 +383,14 @@ def run(target, interval, profile):
 @click.option("--host", default="0.0.0.0")
 @click.option("--port", default=8080)
 def dash(host, port):
+    import os
+    if os.environ.get("OBSIDIOS_ENV", "dev").strip().lower() in ("prod", "production"):
+        from config.settings import validate_prod_config
+        errs = validate_prod_config()
+        if errs:
+            for e in errs:
+                console.print(f"  [bold red]BLOCKED:[/] {e}")
+            raise SystemExit(2)
     logger.info(f"Starting Gunicorn on {host}:{port} with gthread workers...")
     subprocess.run([sys.executable, "-m", "gunicorn", "-k", "gthread", "--threads", "10", "-w", "1", "-b", f"{host}:{port}", "dashboard.app:app"])
 

@@ -118,7 +118,7 @@ This starts:
 
 Navigate to **http://localhost:8080**
 
-Default credentials: `admin` / `obsidios123`
+Dev credentials: `admin` / `obsidios123` (dev only — production refuses defaults; set `DASHBOARD_PASS`, optional `VIEWER_USER`/`VIEWER_PASS`; auth is 15-min access + 7-day refresh via `POST /api/v2/login`)
 
 ### 4. Configure & Start Scanning
 
