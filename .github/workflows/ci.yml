@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   lint-test:
     runs-on: ubuntu-latest
@@ -27,7 +30,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest pytest-cov ruff pip-audit
+          pip install pytest pytest-cov ruff bandit pip-audit
       - name: Ruff lint
         run: ruff check .
       - name: Syntax check
@@ -40,12 +43,15 @@ jobs:
           for f in iris/*.py oracle/*.py phantom/*.py forge/*.py sentinel/*.py shield/*.py echo/*.py dashboard/*.py alerts/*.py antibody/*.py; do
             python3 -m py_compile "$f"
           done
+      - name: JavaScript syntax check
+        run: node --check dashboard/static/app.js
       - name: Run tests with coverage report
         # First green runs establish the baseline; then pin --cov-fail-under=<baseline>
         run: python3 -m pytest tests/ -q --cov --cov-report=term-missing
-      - name: Dependency audit
-        run: python3 -m pip_audit --desc || pip-audit --desc
-        continue-on-error: true
+      - name: Security static analysis
+        run: bandit -r . -x ./tests,./.venv -ll -q
+      - name: Dependency audit (project requirements)
+        run: python3 -m pip_audit -r requirements.txt --desc
 
   docker:
     runs-on: ubuntu-latest
@@ -61,4 +67,5 @@ jobs:
           scan-type: fs
           scan-ref: .
           severity: HIGH,CRITICAL
-          exit-code: "0"
+          ignore-unfixed: true
+          exit-code: "1"

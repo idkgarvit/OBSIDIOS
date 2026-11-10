@@ -32,6 +32,8 @@ async def calculate_posture_score() -> dict[str, Any]:
     exposure_score = await _calculate_exposure_score()
     shield_score = await _calculate_shield_score()
     compliance_score = await _calculate_compliance_score()
+    wireless_score = await _calculate_wireless_score()
+    osint_score = await _calculate_osint_score()
     
     weights = {
         'patch': 0.25,
@@ -51,12 +53,24 @@ async def calculate_posture_score() -> dict[str, Any]:
         compliance_score['score'] * weights['compliance']
     )
     
+    confirmed_vulns = await db.fetch_val(
+        """SELECT COUNT(*) FROM port_cves pc
+           JOIN ports p ON p.id = pc.port_id
+           JOIN hosts h ON h.id = p.host_id
+           WHERE h.is_active=1 AND COALESCE(pc.dismissed, 0)=0
+             AND pc.exploit_status IN ('CONFIRMED_EXPLOITABLE','VERIFIED')""",
+        default=0,
+    )
     await db.execute(
         """INSERT INTO posture_scores
-           (overall_score, wired_score, behavioral_score, exploit_score, osint_score, active_alerts, active_paths, confirmed_vulns)
-           VALUES (?,?,?,?,?,?,?,?)""",
-        (overall_score, exposure_score['score'], anomaly_score['score'], patch_score['score'],
-         0, attack_path_score['active_alerts'], attack_path_score['active_paths'], patch_score['critical_cves'])
+           (overall_score, wired_score, wireless_score, behavioral_score,
+            exploit_score, osint_score, active_alerts, active_paths,
+            confirmed_vulns)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        (overall_score, exposure_score['score'], wireless_score['score'],
+         anomaly_score['score'], patch_score['score'], osint_score['score'],
+         attack_path_score['active_alerts'], attack_path_score['active_paths'],
+         int(confirmed_vulns or 0))
     )
     
     risk_level = 'CRITICAL' if overall_score < 40 else 'HIGH' if overall_score < 60 else 'MEDIUM' if overall_score < 80 else 'LOW'
@@ -70,7 +84,9 @@ async def calculate_posture_score() -> dict[str, Any]:
             'behavioral_anomalies': anomaly_score,
             'exposure': exposure_score,
             'active_defense': shield_score,
-            'compliance': compliance_score
+            'compliance': compliance_score,
+            'wireless': wireless_score,
+            'osint': osint_score,
         },
         'recommendations': _generate_recommendations(patch_score, attack_path_score, anomaly_score),
         'recorded_at': time.time()
@@ -78,17 +94,28 @@ async def calculate_posture_score() -> dict[str, Any]:
 
 
 async def _calculate_patch_score() -> dict:
-    """Calculate patch management score."""
-    total_cves = await db.fetch_val('SELECT COUNT(*) FROM cves')
-    critical_cves = await db.fetch_val("SELECT COUNT(*) FROM cves WHERE severity='CRITICAL'")
-    high_cves = await db.fetch_val("SELECT COUNT(*) FROM cves WHERE severity='HIGH'")
-    
+    """Calculate patch score from vulnerabilities actually mapped to live hosts.
+
+    The previous version counted every row in the global `cves` cache, so
+    downloading a CVE feed with a million entries tanked the score even when
+    no host was affected, and dismissed/NOT_AFFECTED findings still counted.
+    """
+    base = """FROM port_cves pc
+              JOIN ports p ON p.id = pc.port_id
+              JOIN hosts h ON h.id = p.host_id
+              JOIN cves c  ON c.id = pc.cve_id
+              WHERE h.is_active=1 AND COALESCE(pc.dismissed, 0)=0
+                AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'"""
+    total_cves = await db.fetch_val(f"SELECT COUNT(*) {base}", default=0) or 0
+    critical_cves = await db.fetch_val(f"SELECT COUNT(*) {base} AND c.severity='CRITICAL'", default=0) or 0
+    high_cves = await db.fetch_val(f"SELECT COUNT(*) {base} AND c.severity='HIGH'", default=0) or 0
+
     if total_cves == 0:
         return {'score': 100, 'total_cves': 0, 'critical_cves': 0, 'status': 'Fully Patched'}
-    
+
     severity_weight = (critical_cves * 3 + high_cves * 2 + (total_cves - critical_cves - high_cves)) / total_cves
     score = max(0, 100 - (severity_weight * 50))
-    
+
     return {
         'score': round(score, 1),
         'total_cves': total_cves,
@@ -150,7 +177,12 @@ async def _calculate_anomaly_score() -> dict:
 async def _calculate_exposure_score() -> dict:
     """Calculate network exposure score."""
     total_hosts = await db.fetch_val('SELECT COUNT(*) FROM hosts WHERE is_active=1')
-    open_ports = await db.fetch_val('SELECT COUNT(*) FROM ports WHERE state="open"')
+    # Ports of retired hosts must not dilute the average: a decommissioned box
+    # with 200 stale open ports used to drag the exposure score down forever.
+    open_ports = await db.fetch_val("""
+        SELECT COUNT(*) FROM ports p JOIN hosts h ON h.id = p.host_id
+        WHERE p.state='open' AND h.is_active=1
+    """)
     exposed_services = await db.fetch_val("""
         SELECT COUNT(*) FROM ports p JOIN hosts h ON h.id = p.host_id
         WHERE p.state='open' AND p.service IN ('http', 'https', 'smb', 'ftp', 'ssh', 'rdp', 'telnet')
@@ -195,10 +227,12 @@ async def _calculate_shield_score() -> dict:
 
 
 async def _calculate_compliance_score() -> dict:
-    """Calculate compliance score (mock - would integrate with compliance mapper)."""
-    critical_cves = await db.fetch_val("SELECT COUNT(*) FROM cves WHERE severity='CRITICAL'")
-    high_cves = await db.fetch_val("SELECT COUNT(*) FROM cves WHERE severity='HIGH'")
-    
+    """Compliance score derived from the live vulnerability exposure."""
+    patch = await _calculate_patch_score()
+    critical_cves = patch.get('critical_cves', 0)
+    high_cves = patch.get('high_cves', 0)
+
+
     if critical_cves == 0 and high_cves == 0:
         return {'score': 100, 'status': 'Compliant'}
     
@@ -208,6 +242,49 @@ async def _calculate_compliance_score() -> dict:
         'score': round(score, 1),
         'critical_issues': critical_cves + high_cves,
         'status': 'Non-Compliant' if critical_cves > 0 else 'Partial'
+    }
+
+
+async def _calculate_wireless_score() -> dict:
+    """Penalize active wireless threats (rogue APs, evil twins, open nets)."""
+    total = await db.fetch_val(
+        'SELECT COUNT(*) FROM wireless_threats WHERE is_active=1', default=0
+    ) or 0
+    serious = await db.fetch_val(
+        """SELECT COUNT(*) FROM wireless_threats WHERE is_active=1
+           AND threat_type IN ('EVIL_TWIN','ROGUE_AP','OPEN_NETWORK',
+                               'DEAUTH_FLOOD','WEAK_ENCRYPTION','PMKID_ATTACK')""",
+        default=0,
+    ) or 0
+    if total == 0:
+        return {'score': 100, 'active_threats': 0, 'serious': 0, 'status': 'No Wireless Threats'}
+    score = max(0, 100 - serious * 12 - (total - serious) * 3)
+    return {
+        'score': round(score, 1),
+        'active_threats': total,
+        'serious': serious,
+        'status': 'Critical' if serious > 0 else 'Monitoring',
+    }
+
+
+async def _calculate_osint_score() -> dict:
+    """Score open OSINT findings instead of hardcoding 0 in the history table."""
+    total = await db.fetch_val(
+        'SELECT COUNT(*) FROM osint_findings WHERE is_remediated=0', default=0
+    ) or 0
+    high = await db.fetch_val(
+        """SELECT COUNT(*) FROM osint_findings
+           WHERE is_remediated=0 AND severity IN ('CRITICAL','HIGH')""",
+        default=0,
+    ) or 0
+    if total == 0:
+        return {'score': 100, 'open_findings': 0, 'high': 0, 'status': 'No OSINT Findings'}
+    score = max(0, 100 - high * 10 - (total - high) * 3)
+    return {
+        'score': round(score, 1),
+        'open_findings': total,
+        'high': high,
+        'status': 'Needs Remediation' if high > 0 else 'Monitoring',
     }
 
 

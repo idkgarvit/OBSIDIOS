@@ -7,7 +7,10 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip &&     pip install --no-cache-dir -r requirements.txt
 
 COPY . .
-RUN mkdir -p chronicle logs reports/output reports/backups reports/templates forge/rules /var/log/suricata && chmod 750 chronicle logs reports forge && chmod 640 config/.env.example || true
+RUN mkdir -p chronicle logs reports/output reports/backups reports/templates forge/rules /var/log/suricata /var/lib/suricata/rules \
+    && touch /var/lib/suricata/rules/emerging-all.rules \
+    && chmod 750 chronicle logs reports forge \
+    && chmod 640 config/.env.example || true
 # Least privilege: daemon needs root for raw sockets/iptables, but default
 # to non-root so `dash`/`audit`/`backup` don't run as root by accident.
 # Compose overrides user for daemon/sentinel/echo as needed.

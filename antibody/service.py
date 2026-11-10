@@ -76,7 +76,7 @@ async def record_feedback(
 
     col = "true_positives" if norm == "TP" else "false_positives"
     await db.execute(
-        f"UPDATE forge_rules SET {col}={col}+1 WHERE id=?",
+        f"UPDATE forge_rules SET {col}={col}+1 WHERE id=?",  # nosec B608 — col is a literal whitelist
         (int(forge_rule_id),),
     )
     await db.execute(
@@ -151,11 +151,18 @@ async def list_suggestions(
             d = dict(r)
         except Exception:
             continue
+        # One malformed legacy row must not hide every other suggestion.
+        try:
+            rule_id = int(d.get("id"))
+            true_positives = int(d.get("true_positives") or 0)
+            false_positives = int(d.get("false_positives") or 0)
+        except (TypeError, ValueError):
+            continue
         s = suggest_for_rule(
-            rule_id=int(d.get("id")),
+            rule_id=rule_id,
             rule_sid=d.get("rule_sid"),
-            true_positives=int(d.get("true_positives") or 0),
-            false_positives=int(d.get("false_positives") or 0),
+            true_positives=true_positives,
+            false_positives=false_positives,
             is_active=bool(d.get("is_active", 1)),
             is_deployed=bool(d.get("is_deployed", 0)),
             fp_threshold=fp_threshold,

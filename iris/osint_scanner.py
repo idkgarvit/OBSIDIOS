@@ -10,6 +10,10 @@ from loguru import logger
 from chronicle import db
 from config.settings import osint as osint_cfg
 
+# Hard ceiling on a single Shodan API call. The client is synchronous and runs
+# in a worker thread; without this, one stuck connection freezes the scan.
+SHODAN_TIMEOUT = 20.0
+
 # Known MAC OUI prefixes for device identification
 _MAC_VENDORS: dict[str, str] = {
     "00:11:22": "Apple",
@@ -58,28 +62,121 @@ _MAC_VENDORS: dict[str, str] = {
     "A8:1E:84": "Motorola",
 }
 
-# Load custom MAC vendors from env file if present
-_ENV_MAC_FILE = os.environ.get("OBSIDIOS_MAC_VENDORS", "")
-if _ENV_MAC_FILE and os.path.exists(_ENV_MAC_FILE):
+# Optional operator-supplied MAC/OUI overrides, loaded from the documented
+# OBSIDIOS_MAC_VENDORS file at import time.
+def _normalise_mac(value: object) -> str:
+    """Upper-case hex of a MAC/OUI, accepting colons, dashes and Cisco dots."""
+    return re.sub(r"[^0-9A-F]", "", str(value or "").upper())
+
+
+def _load_mac_vendors(path: str, table: dict[str, str] | None = None) -> int:
+    """Merge operator MAC/OUI overrides; returns how many entries were accepted.
+
+    Entries may be whitespace- or tab-separated and may be a full MAC rather
+    than a three-byte OUI. The old loader accepted full-MAC prefixes but the
+    lookup truncated every key to 8 characters, so those entries never matched.
+    Operator entries are loaded after the built-ins, and `_lookup_mac_vendor`
+    prefers the most specific (longest) prefix, so they override them.
+    """
+    target = _MAC_VENDORS if table is None else table
+    added = 0
     try:
-        with open(_ENV_MAC_FILE) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                parts = line.split(" ", 1)
-                if len(parts) == 2 and re.match(r'[0-9A-Fa-f:]{8,}', parts[0]):
-                    _MAC_VENDORS[parts[0].upper()] = parts[1]
-    except Exception:
-        pass
+                parts = line.split(None, 1)
+                if len(parts) != 2:
+                    continue
+                prefix = _normalise_mac(parts[0])
+                vendor = parts[1].strip()
+                if len(prefix) >= 6 and vendor:
+                    target[parts[0].upper()] = vendor
+                    added += 1
+    except (OSError, UnicodeDecodeError):
+        return 0
+    return added
 
 
-def _lookup_mac_vendor(mac: str) -> str | None:
-    """Look up device vendor by MAC OUI."""
-    oui = mac.upper().strip().replace("-", ":")[:8]
-    for prefix, vendor in _MAC_VENDORS.items():
-        if oui.startswith(prefix):
-            return vendor
+_ENV_MAC_FILE = os.environ.get("OBSIDIOS_MAC_VENDORS", "")
+if _ENV_MAC_FILE:
+    _load_mac_vendors(_ENV_MAC_FILE)
+
+
+def _lookup_mac_vendor(mac: str, table: dict[str, str] | None = None) -> str | None:
+    """Look up device vendor by MAC OUI (colons, dashes or Cisco dots).
+
+    The longest matching prefix wins, and on a tie the later entry wins. That
+    lets a full-MAC operator override beat the built-in six-hex OUI it starts
+    with, and lets an operator re-declare an OUI to replace a built-in vendor.
+    Returning the first match in insertion order silently ignored both.
+    """
+    key = _normalise_mac(mac)
+    if len(key) < 6:
+        return None
+    vendor: str | None = None
+    best_len = 0
+    for prefix, candidate in (_MAC_VENDORS if table is None else table).items():
+        normalised = _normalise_mac(prefix)
+        if normalised and len(normalised) >= best_len and key.startswith(normalised):
+            vendor = candidate
+            best_len = len(normalised)
+    return vendor
+
+
+async def _store_finding(
+    source: str, finding_type: str, target: str, detail: str, severity: str
+) -> bool:
+    """Record an OSINT finding once while it is still unremediated.
+
+    Scanning an unchanged network used to insert the same row on every pass,
+    so the posture score drifted purely with scan frequency and the table grew
+    without bound.
+
+    The existence check is part of the INSERT: a separate SELECT-then-INSERT
+    let two overlapping scans (scheduled run plus a manual `trigger`) both see
+    no row and insert duplicates, which double-counts the finding in the
+    posture score.
+    """
+    row = await db.execute_returning(
+        """INSERT INTO osint_findings (source, finding_type, target, detail, severity)
+           SELECT ?, ?, ?, ?, ?
+           WHERE NOT EXISTS (
+               SELECT 1 FROM osint_findings
+               WHERE source=? AND finding_type=? AND target=? AND detail=?
+                 AND is_remediated=0
+           )
+           RETURNING id""",
+        (source, finding_type, target, detail, severity,
+         source, finding_type, target, detail),
+    )
+    return row is not None
+
+
+def _reverse_dns(ip: str) -> str | None:
+    """Resolve an address with nslookup (blocking — run it in an executor)."""
+    try:
+        result = subprocess.run(
+            ["nslookup", ip],
+            capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        # ISC/BIND nslookup prints "Name: host" while busybox prints
+        # "name = host". The old pattern only understood the latter, so
+        # reverse DNS never resolved on a standard Linux box.
+        m = re.search(r'^\s*name\s*[:=]\s*(\S+)', line, re.IGNORECASE)
+        if not m:
+            continue
+        # Some resolvers put the failure reason on a "Name:" line.
+        name = m.group(1).rstrip(".")
+        if name.upper() in {"NXDOMAIN", "NONEXISTENT", "UNKNOWN", "NONE"}:
+            continue
+        return name
     return None
 
 
@@ -87,28 +184,22 @@ async def _enrich_local_ip(ip: str) -> list[dict]:
     """Gather local intelligence for an internal IP: reverse DNS, DHCP, MAC vendor."""
     findings = []
 
-    # Try reverse DNS
+    # Reverse DNS used to run synchronously inside the event loop: 200 internal
+    # hosts × 5s timeout froze the dashboard for ~16 minutes. Offload it.
     try:
-        result = subprocess.run(
-            ["nslookup", ip],
-            capture_output=True, text=True, timeout=5
+        hostname = await asyncio.get_running_loop().run_in_executor(
+            None, _reverse_dns, ip
         )
-        if result.returncode == 0:
-            for line in result.stdout.splitlines():
-                m = re.search(r'name\s*=\s*(\S+)\.?\s*$', line, re.IGNORECASE)
-                if m:
-                    hostname = m.group(1).rstrip(".")
-                    findings.append({
-                        "source": "LOCAL_DNS",
-                        "finding_type": "REVERSE_DNS",
-                        "detail": f"Hostname: {hostname}",
-                        "severity": "INFO",
-                    })
-                    break
-    except FileNotFoundError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug(f"[IRIS/OSINT] Reverse DNS failed for {ip}: {exc}")
+        hostname = None
+    if hostname:
+        findings.append({
+            "source": "LOCAL_DNS",
+            "finding_type": "REVERSE_DNS",
+            "detail": f"Hostname: {hostname}",
+            "severity": "INFO",
+        })
 
     # Look up MAC and vendor from hosts table
     try:
@@ -144,50 +235,97 @@ async def run_osint_scan(ip_list: list[str]):
 
     for ip in ip_list:
         try:
-            # 1. Private IP Check (Always runs)
+            # Reject anything that is not an IP before it can reach Shodan or
+            # be counted as an internal asset.
             try:
                 ip_obj = ipaddress.ip_address(ip)
-                if ip_obj.is_private:
-                    logger.debug(f"[IRIS/OSINT] {ip} is a private IP. Enriching with local intel.")
-                    # Enrich with local network intelligence
-                    local_findings = await _enrich_local_ip(ip)
-                    if not local_findings:
-                        # Fallback: just log as internal network
-                        await db.execute(
-                            """INSERT INTO osint_findings (source, finding_type, target, detail, severity)
-                               VALUES (?, ?, ?, ?, ?)""",
-                            ("LOCAL", "INTERNAL_NETWORK", ip, "Private IP - No external info available", "INFO")
-                        )
-                    for f in local_findings:
-                        await db.execute(
-                            """INSERT INTO osint_findings (source, finding_type, target, detail, severity)
-                               VALUES (?, ?, ?, ?, ?)""",
-                            (f["source"], f["finding_type"], ip, f["detail"], f["severity"])
-                        )
-                    continue
             except ValueError:
-                pass
-            
+                logger.debug(f"[IRIS/OSINT] Skipping invalid address {ip!r}")
+                continue
+
+            # 1. Non-routable addresses (RFC1918, CGNAT, loopback, link-local,
+            # documentation ranges) get local enrichment only. `is_private` is
+            # the wrong test: it is False for 100.64.0.0/10 (CGNAT), which
+            # must never be sent to Shodan.
+            if not ip_obj.is_global:
+                logger.debug(f"[IRIS/OSINT] {ip} is not globally routable. Enriching with local intel.")
+                # Enrich with local network intelligence
+                local_findings = await _enrich_local_ip(ip)
+                if not local_findings:
+                    # Fallback: just log as internal network
+                    await _store_finding(
+                        "LOCAL", "INTERNAL_NETWORK", ip,
+                        "Private IP - No external info available", "INFO",
+                    )
+                for f in local_findings or []:
+                    if not isinstance(f, dict):
+                        continue
+                    source = f.get("source")
+                    finding_type = f.get("finding_type")
+                    detail = f.get("detail")
+                    if not (source and finding_type and detail):
+                        continue
+                    await _store_finding(
+                        source, finding_type, ip, detail,
+                        f.get("severity") or "INFO",
+                    )
+                continue
+
             # 2. External Scan (Only runs if API key is present and IP is not private)
             if not api:
                 continue
 
-            # Wrap blocking shodan call in run_in_executor
-            loop = asyncio.get_event_loop()
-            info = await loop.run_in_executor(None, api.host, ip)
+            # Wrap blocking shodan call in run_in_executor. A hard timeout is
+            # required: a hung HTTPS connection otherwise stalls the whole
+            # scan pipeline (and the dashboard event loop it shares).
+            loop = asyncio.get_running_loop()
+            try:
+                info = await asyncio.wait_for(
+                    loop.run_in_executor(None, api.host, ip),
+                    timeout=SHODAN_TIMEOUT,
+                )
+            except TimeoutError:
+                logger.warning(
+                    f"[IRIS/OSINT] Shodan lookup for {ip} timed out "
+                    f"after {SHODAN_TIMEOUT:.0f}s")
+                continue
             
             if info:
-                # Save findings
-                for item in info.get("data", []):
-                    port = item.get("port")
-                    service = item.get("transport", "") + "/" + str(port)
-                    
-                    await db.execute(
-                        """INSERT INTO osint_findings (source, finding_type, target, detail, severity)
-                           VALUES (?, ?, ?, ?, ?)""",
-                        ("SHODAN", "EXTERNAL_EXPOSURE", ip, f"Exposed Service: {service}", "HIGH")
-                    )
-                logger.success(f"[IRIS/OSINT] Findings recorded for {ip}")
+                # Shodan payloads are external data. A null/non-list `data`
+                # or a non-dict banner used to abort the whole host, so one
+                # malformed entry silently dropped every valid exposure.
+                data = info.get("data", []) if isinstance(info, dict) else None
+                if not isinstance(data, list):
+                    logger.warning(
+                        f"[IRIS/OSINT] Malformed Shodan response for {ip}; skipping")
+                    continue
+                stored = 0
+                for item in data:
+                    if not isinstance(item, dict):
+                        logger.debug(
+                            f"[IRIS/OSINT] Skipping malformed Shodan banner for {ip}")
+                        continue
+                    try:
+                        port = int(item.get("port"))
+                    except (TypeError, ValueError):
+                        continue
+                    if not 1 <= port <= 65535:
+                        continue
+                    transport = item.get("transport")
+                    if not isinstance(transport, str) or not transport.strip():
+                        transport = "unknown"
+                    else:
+                        transport = transport.strip().lower()
+                    if await _store_finding(
+                        "SHODAN", "EXTERNAL_EXPOSURE", ip,
+                        f"Exposed Service: {transport}/{port}", "HIGH",
+                    ):
+                        stored += 1
+                if stored:
+                    logger.success(
+                        f"[IRIS/OSINT] {stored} finding(s) recorded for {ip}")
+                else:
+                    logger.debug(f"[IRIS/OSINT] No new findings for {ip}")
         except shodan.APIError as e:
             if "No information available" not in str(e) and "Invalid IP" not in str(e):
                 logger.warning(f"[IRIS/OSINT] Shodan error for {ip}: {e}")

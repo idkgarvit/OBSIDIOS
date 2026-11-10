@@ -2,68 +2,98 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
+import re
+import tempfile
 
 from loguru import logger
 
 from chronicle import db
 
 _GENERIC_PROTOCOLS = {"http", "https", "tcp", "udp", "http-proxy", "http-alt"}
+NUCLEI_TIMEOUT_SECONDS = int(os.environ.get("OBSIDIOS_NUCLEI_TIMEOUT", "1800"))
 
 def _normalize_service(svc: str) -> str:
     return svc.strip().lower()
+
+def _valid_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except (ValueError, TypeError):
+        return False
 
 async def run_nuclei_scan(ip_list: list[str]):
     """
     Run Nuclei against a list of IPs and store findings as vulnerabilities.
     """
-    if not ip_list:
+    targets = [ip for ip in ip_list if _valid_ip(ip)]
+    if not targets:
         return
-        
-    logger.info(f"[IRIS/NUCLEI] Starting template-based scan for {len(ip_list)} hosts...")
-    
-    # Create a temporary file with targets for nuclei
-    with open("/tmp/nuclei_targets.txt", "w") as f:
-        for ip in ip_list:
-            f.write(f"{ip}\n")
-            
+
+    logger.info(f"[IRIS/NUCLEI] Starting template-based scan for {len(targets)} hosts...")
+    target_file = None
     try:
+        # mkstemp gives an unpredictable, 0600 file; no symlink/race surface.
+        fd, target_file = tempfile.mkstemp(prefix="obsidios-nuclei-", suffix=".txt")
+        with os.fdopen(fd, "w") as f:
+            for ip in targets:
+                f.write(f"{ip}\n")
+
         # Run nuclei: -l (list), -jsonl (json output), -silent, -ni (no-interact)
-        cmd = ["nuclei", "-l", "/tmp/nuclei_targets.txt", "-jsonl", "-silent", "-ni", "-stats"]
+        cmd = ["nuclei", "-l", target_file, "-jsonl", "-silent", "-ni", "-stats"]
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
-        
-        stdout, stderr = await process.communicate()
-        
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=NUCLEI_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logger.error(f"[IRIS/NUCLEI] Timed out after {NUCLEI_TIMEOUT_SECONDS}s; terminating")
+            process.kill()
+            await process.wait()
+            return
+
         findings_count = 0
-        for line in stdout.decode().splitlines():
+        for line in stdout.decode(errors="replace").splitlines():
             try:
                 data = json.loads(line)
-                findings_count += 1
+            except json.JSONDecodeError as exc:
+                logger.error(f"[IRIS/NUCLEI] Error parsing line: {exc}")
+                continue
+            try:
                 await _process_nuclei_finding(data)
-            except Exception as e:
-                logger.error(f"[IRIS/NUCLEI] Error parsing line: {e}")
-                
+                findings_count += 1
+            except Exception as exc:
+                logger.error(f"[IRIS/NUCLEI] Could not persist finding: {exc}")
+
         logger.success(f"[IRIS/NUCLEI] Scan complete. {findings_count} findings recorded.")
-        
     except Exception as e:
         logger.error(f"[IRIS/NUCLEI] Execution error: {e}")
     finally:
-        if os.path.exists("/tmp/nuclei_targets.txt"):
-            os.remove("/tmp/nuclei_targets.txt")
+        if target_file:
+            try:
+                os.remove(target_file)
+            except OSError:
+                pass
 
 async def _process_nuclei_finding(data: dict):
     """
     Transform a Nuclei finding into the OBSIDIOS vulnerability schema.
     """
-    template_id = data.get("template-id")
-    info = data.get("info", {})
-    severity_str = info.get("severity", "info").upper()
+    if not isinstance(data, dict):
+        return
+    info = data.get("info")
+    if not isinstance(info, dict):
+        info = {}
+    severity_str = str(info.get("severity", "info")).strip().upper()
     description = info.get("description", "")
+    if not isinstance(description, str):
+        description = str(description)
     
     # Map Nuclei severity to our Severity enum
     severity_map = {
@@ -75,14 +105,19 @@ async def _process_nuclei_finding(data: dict):
     }
     mapped_severity = severity_map.get(severity_str, "LOW")
     
-    # Extract CVE ID if available, else use template-id
-    cve_id = template_id
-    if "classification" in info and "cve-id" in info["classification"]:
-        cve_ids = info["classification"]["cve-id"]
-        if isinstance(cve_ids, list) and cve_ids:
-            cve_id = cve_ids[0]
-        elif isinstance(cve_ids, str):
-            cve_id = cve_ids
+    # Extract CVE ID if available, else namespace the template id so it can
+    # never masquerade as a real CVE in CVSS/reporting queries.
+    template_id = str(data.get("template-id") or "unknown-template")[:120]
+    cve_id = f"NUCLEI-{template_id}"
+    classification = info.get("classification")
+    if isinstance(classification, dict):
+        cve_ids = classification.get("cve-id")
+        candidate = cve_ids[0] if isinstance(cve_ids, list) and cve_ids else cve_ids
+        if isinstance(candidate, str):
+            candidate = candidate.strip().upper()
+            # Only accept a syntactically real CVE identifier.
+            if re.fullmatch(r"CVE-\d{4}-\d{4,}", candidate):
+                cve_id = candidate
 
     # Step 1: Upsert into cves table
     cve_row = await db.execute_returning(
@@ -100,9 +135,15 @@ async def _process_nuclei_finding(data: dict):
         
     cve_db_id = cve_row["id"]
     ip = data.get("ip")
+    if not isinstance(ip, str) or not _valid_ip(ip):
+        ip = None
     port_val = data.get("port")
     
-    if ip and port_val:
+    try:
+        port_val = int(port_val)
+    except (TypeError, ValueError):
+        port_val = None
+    if ip and port_val and 1 <= port_val <= 65535:
         # Step 2: Link to port — skip if port is a generic protocol without a known product
         host_row = await db.fetch_one("SELECT id FROM hosts WHERE ip=?", (ip,))
         if host_row:

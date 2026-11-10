@@ -10,7 +10,11 @@
         X-Content-Type-Options nosniff
         X-Frame-Options DENY
         Referrer-Policy no-referrer
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws: wss:"
+        Content-Security-Policy "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; img-src 'self' data:; connect-src 'self'"
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+        Cross-Origin-Opener-Policy same-origin
+        Cross-Origin-Resource-Policy same-origin
         -Server
     }
     log {

@@ -33,7 +33,10 @@ async def generate_patch_priority() -> dict[str, Any]:
         JOIN port_cves pc ON pc.cve_id = c.id
         JOIN ports p ON p.id = pc.port_id
         JOIN hosts h ON h.id = p.host_id
-        WHERE h.is_active=1 AND (c.cvss_v3 IS NOT NULL OR c.severity != 'NONE')
+        WHERE h.is_active=1
+          AND COALESCE(pc.dismissed,0)=0
+          AND COALESCE(pc.verified_status,'') != 'NOT_AFFECTED'
+          AND (c.cvss_v3 IS NOT NULL OR c.severity != 'NONE')
         ORDER BY c.cvss_v3 DESC
     """)
     
@@ -46,13 +49,17 @@ async def generate_patch_priority() -> dict[str, Any]:
         }
     
     priority_list = []
-    seen_cves = set()
-    
+    # A CVE can be present on several hosts. Deduping by CVE alone (the old
+    # behaviour) silently dropped every host but the arbitrary first one,
+    # so the patch list missed real machines.
+    seen = set()
+
     for row in cves_with_context:
         cve_id = row['cve_id']
-        if cve_id in seen_cves:
+        key = (cve_id, row['ip'], row['port'])
+        if key in seen:
             continue
-        seen_cves.add(cve_id)
+        seen.add(key)
         
         cvss = row['effective_cvss'] or row['cvss_v3'] or 0
         asset_val = row['asset_value'] or 5

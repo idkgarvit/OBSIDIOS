@@ -63,7 +63,6 @@ SERVICE_ATTACKS: dict[str | int, list[dict]] = {
         {"technique": "CMS Fingerprinting","tool": "whatweb <ip>; wpscan --url http://<ip>",                              "detail": "Identify CMS version (WordPress, Joomla, Drupal) and check for known plugin vulns."},
         {"technique": "Path Traversal",   "tool": "ffuf -u http://<ip>/FUZZ/../../../etc/passwd -w /usr/share/seclists/Discovery/Web-Content/raft-small-words.txt", "detail": "Attempt directory traversal to read system files."},
     ],
-    "https": [],  # Same as http — handled by service name normalisation
 
     # ── Databases ──
     "mysql": [
@@ -122,7 +121,7 @@ SERVICE_ALIASES = {
     "redis": "redis",
     "winrm": "winrm",
     "telnet": "telnet",
-    "modbus": "modbus",
+    "modbus": "modbus", "bacnet": "bacnet",
 }
 
 
@@ -160,21 +159,52 @@ def classify_port_anomaly(host_types: list[str], port: int, service: str | None 
 
 
 async def get_anomalous_ports() -> list[dict]:
-    """Get all hosts with anomalous ports (ports that don't match host type)."""
+    """Get all hosts with anomalous ports (ports that don't match host type).
+
+    One join instead of a query per host: a 2 000-host scan otherwise issued
+    2 001 round-trips on the single background DB loop and starved every other
+    dashboard request behind it.
+    """
     results = []
-    hosts = await db.fetch_all("SELECT id, ip, hostname, os_name FROM hosts WHERE is_active=1")
-    for host in hosts:
-        ports = await db.fetch_all("SELECT port, protocol, service, state FROM ports WHERE host_id=? AND state='open'", (host['id'],))
-        # Get host types from stored host data or detect from ports
-        open_ports = [p['port'] for p in ports]
-        host_types = _detect_host_type_for_ports(open_ports)
+    rows = await db.fetch_all(
+        """SELECT h.id AS host_id, h.ip, h.hostname, h.os_name,
+                  p.port, p.protocol, p.service
+           FROM hosts h
+           LEFT JOIN ports p ON p.host_id = h.id AND p.state = 'open'
+           WHERE h.is_active = 1
+           ORDER BY h.id, p.port"""
+    ) or []
+
+    hosts: dict[int, dict] = {}
+    for row in rows:
+        entry = hosts.setdefault(row['host_id'], {
+            "ip": row['ip'],
+            "hostname": row['hostname'],
+            "os": row['os_name'],
+            "ports": [],
+        })
+        if row['port'] is not None:
+            entry["ports"].append(row)
+
+    for entry in hosts.values():
+        ports = entry["ports"]
+        host_types = _detect_host_type_for_ports([p['port'] for p in ports])
         anomalous = []
         for p in ports:
             cls = classify_port_anomaly(host_types, p['port'], p['service'])
             if cls["anomalous"]:
-                anomalous.append({"port": p['port'], "protocol": p['protocol'], "service": p['service'], "reason": cls["reason"]})
+                anomalous.append({
+                    "port": p['port'], "protocol": p['protocol'],
+                    "service": p['service'], "reason": cls["reason"],
+                })
         if anomalous:
-            results.append({"ip": host['ip'], "hostname": host['hostname'], "os": host['os_name'], "detected_type": host_types, "anomalous_ports": anomalous})
+            results.append({
+                "ip": entry["ip"],
+                "hostname": entry["hostname"],
+                "os": entry["os"],
+                "detected_type": host_types,
+                "anomalous_ports": anomalous,
+            })
     return results
 
 
@@ -191,12 +221,10 @@ def _detect_host_type_for_ports(open_ports: list[int]) -> list[str]:
 def get_attacks_for_service(service_name: str, port: int) -> list[dict]:
     """Return attack techniques for a given service/port combo."""
     svc = (service_name or "").lower().strip()
-    # Try direct service name lookup
-    if svc in SERVICE_ATTACKS:
-        return SERVICE_ATTACKS[svc]
-    # Try alias lookup
-    alias = SERVICE_ALIASES.get(svc)
-    if alias and alias in SERVICE_ATTACKS:
+    # Resolve the alias first: "https" must reach the http playbook instead of
+    # short-circuiting on a placeholder entry.
+    alias = SERVICE_ALIASES.get(svc, svc)
+    if alias in SERVICE_ATTACKS:
         return SERVICE_ATTACKS[alias]
     # Port-based fallback
     port_map = {
@@ -232,26 +260,39 @@ def _get_local_ips() -> set[str]:
 async def generate_attacker_view() -> dict[str, Any]:
     """Generate a comprehensive attacker perspective with specific techniques."""
     local_ips = _get_local_ips()
-    hosts = await db.fetch_all("""
-        SELECT id, ip, hostname, os_name, risk_score, asset_value
-        FROM hosts WHERE is_active=1 ORDER BY risk_score DESC
-    """)
+    # Single join: the old per-host port query made this endpoint O(hosts)
+    # round-trips and could exceed the dashboard's 120 s wait on large scans.
+    rows = await db.fetch_all("""
+        SELECT h.id AS host_id, h.ip, h.hostname, h.os_name, h.risk_score,
+               p.port, p.protocol, p.service
+        FROM hosts h
+        LEFT JOIN ports p ON p.host_id = h.id AND p.state = 'open'
+        WHERE h.is_active = 1
+        ORDER BY h.risk_score DESC, h.id, p.port
+    """) or []
 
     # Ports considered admin/infrastructure (not attacker-facing on the host machine)
     ADMIN_PORTS = {8080, 8443, 9090, 3000, 5000, 2222}
 
+    hosts: dict[int, dict] = {}
+    for row in rows:
+        entry = hosts.setdefault(row['host_id'], {
+            "ip": row['ip'],
+            "hostname": row['hostname'],
+            "os": row['os_name'],
+            "risk": row['risk_score'],
+            "ports": [],
+        })
+        if row['port'] is not None:
+            entry["ports"].append(row)
+
     all_findings = []
     attack_counts = {"total_techniques": 0, "by_category": {}}
 
-    for host in hosts:
+    for host in hosts.values():
         is_local_machine = host['ip'] in local_ips
-        ports = await db.fetch_all("""
-            SELECT port, protocol, service, version FROM ports
-            WHERE host_id=? AND state='open'
-        """, (host['id'],))
-
         host_attacks = []
-        for p in ports:
+        for p in host["ports"]:
             # Skip admin/infrastructure ports on the host machine (dashboard, monitoring)
             if is_local_machine and p['port'] in ADMIN_PORTS:
                 continue
@@ -273,8 +314,8 @@ async def generate_attacker_view() -> dict[str, Any]:
             all_findings.append({
                 "ip": host['ip'],
                 "hostname": host['hostname'],
-                "os": host['os_name'],
-                "risk": host['risk_score'],
+                "os": host['os'],
+                "risk": host['risk'],
                 "is_local_machine": is_local_machine,
                 "attacks": host_attacks,
             })
@@ -284,7 +325,10 @@ async def generate_attacker_view() -> dict[str, Any]:
         f"• {len(hosts)} discoverable hosts",
         f"• {attack_counts['total_techniques']} possible attack techniques identified",
     ]
-    for cat, count in sorted(attack_counts["by_category"].items(), key=lambda x: -x[1])[:5]:
+    # Sort on count then category so equal counts produce a stable summary
+    # (dict order was insertion-dependent and changed between runs).
+    for cat, count in sorted(
+            attack_counts["by_category"].items(), key=lambda x: (-x[1], x[0]))[:5]:
         summary_lines.append(f"  └ {cat}: {count} techniques")
 
     return {

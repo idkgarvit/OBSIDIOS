@@ -184,11 +184,24 @@ async def map_compliance(framework: str = 'PCI-DSS') -> dict[str, Any]:
         "SELECT ip, risk_score, os_name FROM hosts WHERE is_active=1 AND risk_score > 30"
     ) or []
 
+    # Only findings that still apply count: a dismissed or NOT_AFFECTED CVE on
+    # a retired host must not keep a requirement NON-COMPLIANT forever.
     cves = await db.fetch_all(
-        "SELECT c.severity, COUNT(*) as cnt FROM cves c JOIN port_cves pc ON pc.cve_id = c.id GROUP BY c.severity"
+        """SELECT c.severity, COUNT(*) as cnt
+           FROM cves c
+           JOIN port_cves pc ON pc.cve_id = c.id
+           JOIN ports p ON p.id = pc.port_id
+           JOIN hosts h ON h.id = p.host_id
+           WHERE h.is_active=1
+             AND COALESCE(pc.dismissed, 0) = 0
+             AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'
+           GROUP BY c.severity"""
     ) or []
 
-    open_ports = await db.fetch_val("SELECT COUNT(*) FROM ports WHERE state='open'") or 0
+    open_ports = await db.fetch_val(
+        """SELECT COUNT(*) FROM ports p JOIN hosts h ON h.id = p.host_id
+           WHERE p.state='open' AND h.is_active=1"""
+    ) or 0
     attack_paths = await db.fetch_val("SELECT COUNT(*) FROM attack_paths WHERE is_active=1") or 0
 
     for req_id, req_info in mapping.items():
@@ -230,7 +243,7 @@ async def map_compliance(framework: str = 'PCI-DSS') -> dict[str, Any]:
             weak_hosts = await db.fetch_all(
                 "SELECT h.ip, p.port, p.service FROM hosts h "
                 "JOIN ports p ON p.host_id = h.id "
-                "WHERE p.state='open' AND p.service IN ('ssh', 'ftp', 'telnet', 'rlogin')"
+                "WHERE p.state='open' AND h.is_active=1 AND p.service IN ('ssh', 'ftp', 'telnet', 'rlogin')"
             ) or []
             if weak_hosts:
                 services = set(r['service'] for r in weak_hosts)
@@ -241,7 +254,7 @@ async def map_compliance(framework: str = 'PCI-DSS') -> dict[str, Any]:
             cleartext = await db.fetch_all(
                 "SELECT h.ip, p.port, p.service FROM hosts h "
                 "JOIN ports p ON p.host_id = h.id "
-                "WHERE p.state='open' AND p.service IN ('ftp', 'telnet', 'http')"
+                "WHERE p.state='open' AND h.is_active=1 AND p.service IN ('ftp', 'telnet', 'http')"
             ) or []
             if cleartext:
                 services = set(r['service'] for r in cleartext)
@@ -252,7 +265,7 @@ async def map_compliance(framework: str = 'PCI-DSS') -> dict[str, Any]:
             web_ports = await db.fetch_all(
                 "SELECT h.ip, p.port, p.service FROM hosts h "
                 "JOIN ports p ON p.host_id = h.id "
-                "WHERE p.state='open' AND p.service IN ('http', 'https', 'apache', 'nginx', 'iis')"
+                "WHERE p.state='open' AND h.is_active=1 AND p.service IN ('http', 'https', 'apache', 'nginx', 'iis')"
             ) or []
             if web_ports:
                 relevant_issues.append(f"{len(web_ports)} web services present — manual DAST/SAST required")

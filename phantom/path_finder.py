@@ -14,6 +14,7 @@ The output feeds directly into FORGE for Suricata rule generation.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from dataclasses import dataclass, field
@@ -59,20 +60,53 @@ CVE_TECHNIQUE_MAP: dict[str, tuple[str, str]] = {
 }
 
 
+def _iter_dicts(value: object):
+    """Yield the dict entries of a value that is supposed to be a list.
+
+    Graph attributes are assembled from DB rows, and a NULL column (or an older
+    writer) can leave `None` where a list of dicts is expected. Iterating that
+    blindly raised TypeError/AttributeError and aborted the whole simulation.
+    """
+    if not isinstance(value, list):
+        return
+    for entry in value:
+        if isinstance(entry, dict):
+            yield entry
+
+
+def _as_score(value: object) -> float:
+    """Coerce a CVSS/ROI value to a finite float, never raising.
+
+    A CVSS score that arrives as the string ``"9.8"`` used to make the
+    ``score > best_score`` comparison raise TypeError and kill the run.
+    """
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
 def _get_technique_for_node(node_data: dict) -> tuple[str, str, str]:
     """
     Determine the most relevant MITRE technique for attacking this node.
     Priority: confirmed CVE mapping → port-based mapping → generic
     """
     # Check CVEs first — most specific
-    for cve in node_data.get("cves", []):
-        cve_id = cve.get("cve_id", "")
-        if cve_id in CVE_TECHNIQUE_MAP:
+    for cve in _iter_dicts(node_data.get("cves")):
+        cve_id = cve.get("cve_id")
+        if isinstance(cve_id, str) and cve_id in CVE_TECHNIQUE_MAP:
             tech, tactic = CVE_TECHNIQUE_MAP[cve_id]
             return tech, tactic, f"Exploit {cve_id}"
 
-    # Port-based mapping
-    ports = {p["port"] for p in node_data.get("ports", [])}
+    # Port-based mapping. Nmap/json can hand us a string port number, and a
+    # missing column can be None; neither matches MITRE_MAP's int sets.
+    ports: set[int] = set()
+    for port in _iter_dicts(node_data.get("ports")):
+        try:
+            ports.add(int(port.get("port")))
+        except (TypeError, ValueError):
+            continue
     for port_set, technique, tactic, desc in MITRE_MAP:
         if ports & port_set:
             return technique, tactic, desc
@@ -112,12 +146,17 @@ def _find_kill_chains(
     raw_paths = []
 
     for entry in entry_nodes:
-        entry_id = entry["id"]
+        if not isinstance(entry, dict):
+            continue
+        entry_id = entry.get("id")
+        if entry_id is None:
+            continue
 
         for target in target_nodes:
-            target_id = target["id"]
-
-            if entry_id == target_id:
+            if not isinstance(target, dict):
+                continue
+            target_id = target.get("id")
+            if target_id is None or entry_id == target_id:
                 continue
 
             try:
@@ -130,7 +169,7 @@ def _find_kill_chains(
                 path_cost = nx.dijkstra_path_length(
                     graph, entry_id, target_id, weight="weight"
                 )
-            except (nx.NetworkXNoPath, nx.NodeNotFound):
+            except (nx.NetworkXNoPath, nx.NodeNotFound, ValueError):
                 continue
 
             # Build steps
@@ -142,15 +181,25 @@ def _find_kill_chains(
                 # Find best CVE for this step
                 best_cve = None
                 best_score = 0.0
-                for cve in node_data.get("cves", []):
-                    score = cve.get("effective_cvss") or cve.get("cvss_v3") or 0.0
-                    if score > best_score:
+                for cve in _iter_dicts(node_data.get("cves")):
+                    score = _as_score(cve.get("effective_cvss"))
+                    if score <= 0:
+                        score = _as_score(cve.get("cvss_v3"))
+                    cve_id = cve.get("cve_id")
+                    if (
+                        score > best_score
+                        and isinstance(cve_id, str)
+                        and cve_id
+                    ):
                         best_score = score
-                        best_cve   = cve.get("cve_id")
+                        best_cve   = cve_id
 
+                # A node without an IP (partial graph, legacy row) must not make
+                # the whole simulation raise KeyError.
+                ip = node_data.get("ip")
                 steps.append(AttackStep(
                     host_id     = node_id,
-                    ip          = node_data["ip"],
+                    ip          = str(ip) if ip else f"host-{node_id}",
                     technique   = technique,
                     tactic      = tactic,
                     cve_id      = best_cve,
@@ -158,8 +207,11 @@ def _find_kill_chains(
                 ))
 
             # Attacker ROI = target asset value / path cost
-            # High-value target that's cheap to reach = high ROI
-            roi = (target.get("asset_value", 5) * 10.0) / max(path_cost, 0.1)
+            # High-value target that's cheap to reach = high ROI.
+            # A NULL asset_value (legacy row) previously raised TypeError here
+            # and aborted the whole simulation.
+            asset_value = _as_score(target.get("asset_value")) or 5.0
+            roi = (asset_value * 10.0) / max(_as_score(path_cost), 0.1)
 
             # Estimate time based on number of steps and exploitability
             est_time = len(steps) * 8.0  # rough: 8 min per hop
@@ -185,7 +237,13 @@ def _find_kill_chains(
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _persist_path(path: AttackPath) -> int | None:
-    """Insert one attack path, return its DB id."""
+    """
+    Insert one attack path — or refresh the existing active row when the same
+    entry/target/route is rediscovered. Returns its DB id.
+
+    Upserting keeps the dashboard and SHIELD pointed at current paths instead
+    of accumulating a duplicate copy of the same kill chain on every run.
+    """
     steps_json = json.dumps([
         {
             "host_id":    s.host_id,
@@ -197,6 +255,25 @@ async def _persist_path(path: AttackPath) -> int | None:
         }
         for s in path.steps
     ])
+
+    existing = await db.fetch_one(
+        """SELECT id FROM attack_paths
+           WHERE entry_host_id=? AND target_host_id=? AND path_json=? AND is_active=1
+           LIMIT 1""",
+        (path.entry_host_id, path.target_host_id, steps_json),
+    )
+    if existing:
+        await db.execute(
+            """UPDATE attack_paths
+               SET simulated_at=?, total_steps=?, attacker_roi=?,
+                   estimated_time_minutes=?
+               WHERE id=?""",
+            (
+                time.time(), path.total_steps, path.attacker_roi,
+                path.estimated_time_minutes, existing["id"],
+            ),
+        )
+        return existing["id"]
 
     row = await db.execute_returning(
         """INSERT INTO attack_paths
@@ -213,6 +290,29 @@ async def _persist_path(path: AttackPath) -> int | None:
         ),
     )
     return row["id"] if row else None
+
+
+async def _retire_stale_paths(keep_ids: list[int]) -> None:
+    """Mark every active attack path outside ``keep_ids`` as inactive.
+
+    Called after each completed simulation so the dashboard, SHIELD and FORGE
+    stop treating a kill chain as live risk once it is no longer reachable.
+    With an empty ``keep_ids`` every active path is retired.
+    """
+    if keep_ids:
+        placeholders = ",".join("?" for _ in keep_ids)
+        sql = (
+            "UPDATE attack_paths SET is_active=0 "
+            f"WHERE is_active=1 AND id NOT IN ({placeholders})"  # nosec B608 - placeholders only
+        )
+        params: tuple = tuple(keep_ids)
+    else:
+        sql = "UPDATE attack_paths SET is_active=0 WHERE is_active=1"
+        params = ()
+    try:
+        await db.execute(sql, params)
+    except Exception as exc:
+        logger.warning(f"[PHANTOM] Could not retire stale attack paths: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -234,7 +334,8 @@ async def run_simulation(max_paths: int = 10) -> SimulationResult:
     graph  = get_graph()
 
     if graph.number_of_nodes() == 0:
-        logger.warning("[PHANTOM] Graph is empty — run IRIS scan first")
+        logger.warning("[PHANTOM] Graph is empty — run IRIS scan first; "
+                       "keeping previous attack paths")
         return result
 
     logger.info(f"[PHANTOM] Simulating on graph: "
@@ -257,13 +358,13 @@ async def run_simulation(max_paths: int = 10) -> SimulationResult:
     gateway_ip = os.environ.get('OBSIDIOS_GATEWAY', '192.168.1.1')
     targets = [t for t in targets if t.get('ip') != gateway_ip]
     target_ids = {t["id"] for t in targets}
-    # Disjoint entries: prefer exposed hosts that are NOT top-value targets
-    filtered_entries = [e for e in entries if e["id"] not in target_ids]
-    if filtered_entries:
-        entries = filtered_entries
+    # Disjoint entries: an exposed host that is also a crown jewel is not useful
+    # as an entry point (Dijkstra would skip entry==target anyway).
+    entries = [e for e in entries if e["id"] not in target_ids]
 
     if not entries:
-        logger.warning("[PHANTOM] No entry points found")
+        logger.warning("[PHANTOM] No entry points found; keeping previous "
+                       "attack paths")
         return result
 
     logger.info(f"[PHANTOM] Entry points: {len(entries)}, Targets: {len(targets)}")
@@ -274,18 +375,43 @@ async def run_simulation(max_paths: int = 10) -> SimulationResult:
     elapsed = time.perf_counter() - t0
 
     if not paths:
-        logger.warning("[PHANTOM] No attack paths found — check graph edges")
+        logger.warning("[PHANTOM] No attack paths found — retiring stale kill chains")
+        # The simulation ran to completion and found nothing reachable. The
+        # previous run's rows used to stay is_active=1 forever, so the
+        # dashboard, SHIELD and FORGE kept treating dead kill chains as risk.
+        await _retire_stale_paths([])
         return result
 
     # ── Persist and build result ───────────────────────────────────────
     for path in paths:
-        path_id = await _persist_path(path)
+        try:
+            path_id = await _persist_path(path)
+        except Exception as exc:
+            # One unwritable path must not discard the rest of the simulation.
+            logger.warning(
+                f"[PHANTOM] Could not persist path "
+                f"{path.entry_host_id}→{path.target_host_id}: {exc}"
+            )
+            continue
         if path_id:
             path.id = path_id
             result.paths.append(path)
 
+    # Retire paths that are no longer reachable so the dashboard, SHIELD and
+    # reports do not keep treating stale kill chains as live risk.
+    #
+    # Only reconcile when at least one write succeeded: if the DB rejected
+    # every path, the rows already on disk are still the best knowledge we
+    # have, and retiring them would blank the dashboard on a transient error.
+    if result.paths:
+        await _retire_stale_paths([p.id for p in result.paths if p.id])
+
     result.total_paths = len(result.paths)
-    result.highest_roi = max(p.attacker_roi for p in result.paths)
+    # Persistence can fail for every path (DB write error, RETURNING issue);
+    # max() on an empty sequence used to turn that into a crash.
+    result.highest_roi = max(
+        (p.attacker_roi for p in result.paths), default=0.0
+    )
 
     logger.success(
         f"[PHANTOM] Simulation complete: {result.total_paths} kill chains found "
@@ -301,13 +427,18 @@ async def run_simulation(max_paths: int = 10) -> SimulationResult:
 def _print_paths(paths: list[AttackPath]) -> None:
     """Pretty-print attack paths to terminal."""
     from rich.console import Console
+    from rich.markup import escape
+
     console = Console()
 
     console.print("\n[bold red]━━━ PHANTOM: ATTACK PATHS DISCOVERED ━━━[/]\n")
 
     for i, path in enumerate(paths, 1):
-        entry_ip  = path.steps[0].ip if path.steps else "?"
-        target_ip = path.steps[-1].ip if path.steps else "?"
+        # Collector data is untrusted: an address or technique containing
+        # Rich markup raised MarkupError and aborted the scan after the paths
+        # had already been persisted.
+        entry_ip  = escape(str(path.steps[0].ip)) if path.steps else "?"
+        target_ip = escape(str(path.steps[-1].ip)) if path.steps else "?"
 
         console.print(
             f"  [bold cyan]Path #{i}[/]  "
@@ -319,10 +450,13 @@ def _print_paths(paths: list[AttackPath]) -> None:
 
         for j, step in enumerate(path.steps):
             prefix = "  └─" if j == len(path.steps) - 1 else "  ├─"
-            cve_str = f"[red]{step.cve_id}[/]" if step.cve_id else "[dim]no CVE[/]"
+            cve_str = (
+                f"[red]{escape(str(step.cve_id))}[/]"
+                if step.cve_id else "[dim]no CVE[/]"
+            )
             console.print(
-                f"     {prefix} [cyan]{step.ip:<18}[/] "
-                f"[yellow]{step.technique}[/] "
-                f"({step.tactic}) {cve_str}"
+                f"     {prefix} [cyan]{escape(str(step.ip)):<18}[/] "
+                f"[yellow]{escape(str(step.technique))}[/] "
+                f"({escape(str(step.tactic))}) {cve_str}"
             )
         console.print()

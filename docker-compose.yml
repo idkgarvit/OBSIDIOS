@@ -1,15 +1,45 @@
+# OBSIDIOS — hardened reference deployment.
+#
+# All services use host networking because scanning, packet capture and
+# iptables must see the real interfaces. Capabilities are dropped to the
+# minimum each role needs instead of relying on Docker's default set.
+#
+# The repository tree is bind-mounted for live updates. Keep `.env` read-only
+# and never commit it.
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+
+x-hardening: &default-hardening
+  init: true
+  security_opt:
+  - no-new-privileges:true
+  restart: unless-stopped
+
 services:
   caddy:
     container_name: caddy-proxy
     depends_on:
     - obsidios-dash
-    image: caddy:latest
+    image: caddy:2.10.0
+    <<: *default-hardening
     network_mode: host
-    restart: unless-stopped
+    read_only: true
+    tmpfs:
+    - /tmp:size=64m,mode=1777
+    cap_drop:
+    - ALL
+    cap_add:
+    - NET_BIND_SERVICE
     volumes:
-    - ./Caddyfile:/etc/caddy/Caddyfile
+    - ./Caddyfile:/etc/caddy/Caddyfile:ro
     - caddy_data:/data
     - caddy_config:/config
+    logging: *default-logging
+
   obsidios-daemon:
     build: .
     user: root
@@ -18,26 +48,57 @@ services:
     - obsidios.py
     - run
     container_name: obsidios-daemon
+    <<: *default-hardening
     environment:
     - PYTHONUNBUFFERED=1
+    - PYTHONDONTWRITEBYTECODE=1
     - OBSIDIOS_ENV=${OBSIDIOS_ENV:-dev}
     - OBSIDIOS_SECRET=${OBSIDIOS_SECRET:-}
+    # Initial scan scope. The dashboard overrides this once a target is set.
+    - OBSIDIOS_TARGET=${OBSIDIOS_TARGET:-192.168.1.0/24}
+    - OBSIDIOS_ALLOW_PUBLIC_SCAN=${OBSIDIOS_ALLOW_PUBLIC_SCAN:-0}
+    - OBSIDIOS_ALLOW_BROAD_SCAN=${OBSIDIOS_ALLOW_BROAD_SCAN:-0}
+    - OBSIDIOS_GATEWAY=${OBSIDIOS_GATEWAY:-192.168.1.1}
     - SHIELD_DRY_RUN=${SHIELD_DRY_RUN:-1}
     - SHIELD_ALLOWLIST=${SHIELD_ALLOWLIST:-}
+    - SHIELD_MAX_ACTIONS_PER_HOUR=${SHIELD_MAX_ACTIONS_PER_HOUR:-10}
+    - IPTABLES_BIN=${IPTABLES_BIN:-iptables}
+    # IRIS / ORACLE tunables that are read straight from the environment.
+    - OBSIDIOS_MAC_VENDORS=${OBSIDIOS_MAC_VENDORS:-}
+    - OBSIDIOS_OFFLINE_GRACE_SECONDS=${OBSIDIOS_OFFLINE_GRACE_SECONDS:-}
+    - OBSIDIOS_FAST_OFFLINE_GRACE_SECONDS=${OBSIDIOS_FAST_OFFLINE_GRACE_SECONDS:-}
+    - OBSIDIOS_NUCLEI_TIMEOUT=${OBSIDIOS_NUCLEI_TIMEOUT:-1800}
+    - OBSIDIOS_THREAT_FEED_FILE=${OBSIDIOS_THREAT_FEED_FILE:-}
+    - OBSIDIOS_THREAT_INTEL_DEMO=${OBSIDIOS_THREAT_INTEL_DEMO:-0}
+    - NVD_API_KEY=${NVD_API_KEY:-}
+    - OBSIDIOS_DISCORD_WEBHOOK=${OBSIDIOS_DISCORD_WEBHOOK:-}
+    # AI providers for ORACLE. Passed explicitly so a deployment that uses
+    # orchestrator secrets (not a .env file) still works.
+    - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+    - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+    - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    - OBSIDIOS_AI_FRESHNESS_HOURS=${OBSIDIOS_AI_FRESHNESS_HOURS:-24}
+    # After rewriting the ruleset, tell the sensor to load it. The command
+    # socket is shared with the sentinel container via the suricata_run volume.
+    - FORGE_RELOAD_CMD=${FORGE_RELOAD_CMD:-suricatasc -c reload-rules /var/run/suricata/suricata-command.socket}
+    - FORGE_RULES_PATH=${FORGE_RULES_PATH:-/app/forge/rules/suricata.rules}
     network_mode: host
+    # NET_RAW/NET_ADMIN are required for SYN scanning and iptables. The DAC
+    # capabilities are needed to write bind mounts owned by the host user.
+    cap_drop:
+    - ALL
     cap_add:
     - NET_RAW
     - NET_ADMIN
-    security_opt:
-    - no-new-privileges:true
-    restart: unless-stopped
+    - DAC_OVERRIDE
+    - CHOWN
+    - FOWNER
     mem_limit: 2g
     cpus: '2.0'
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: '3'
+    pids_limit: 512
+    stop_grace_period: 20s
+    logging: *default-logging
     healthcheck:
       test:
       - CMD-SHELL
@@ -48,50 +109,88 @@ services:
       start_period: 30s
     volumes:
     - ./chronicle:/app/chronicle
-    - ./obsidios.py:/app/obsidios.py
-    - ./oracle:/app/oracle
-    - ./echo:/app/echo
-    - ./shield:/app/shield
+    - ./obsidios.py:/app/obsidios.py:ro
+    - ./oracle:/app/oracle:ro
+    - ./echo:/app/echo:ro
+    - ./shield:/app/shield:ro
     - ./forge:/app/forge
-    - ./phantom:/app/phantom
-    - ./iris:/app/iris
-    - ./alerts:/app/alerts
+    - ./phantom:/app/phantom:ro
+    - ./iris:/app/iris:ro
+    - ./alerts:/app/alerts:ro
     - ./logs:/app/logs
     - ./reports:/app/reports
-    - ./config:/app/config
-    - ./nuclei:/usr/local/bin/nuclei
-    - ./nt.zip:/tmp/nt.zip
-    - ./.env:/app/.env
+    - ./config:/app/config:ro
+    - ./.env:/app/.env:ro
+    - suricata_run:/var/run/suricata
+
   obsidios-dash:
     build: .
+    # Root is required only to write the SQLite DB created by the root daemon;
+    # all network/kernel capabilities stay dropped.
+    user: root
     command:
     - python3
     - obsidios.py
     - dash
+    - --host
+    - 127.0.0.1
     - --port
     - '8080'
     container_name: obsidios-dash
     depends_on:
     - obsidios-daemon
+    <<: *default-hardening
     environment:
     - PYTHONUNBUFFERED=1
+    - PYTHONDONTWRITEBYTECODE=1
     - OBSIDIOS_ENV=${OBSIDIOS_ENV:-dev}
     - OBSIDIOS_SECRET=${OBSIDIOS_SECRET:-}
+    # Credentials are read from the process environment, so they must be
+    # passed through explicitly; a .env value alone never reaches the
+    # container.
+    - DASHBOARD_USER=${DASHBOARD_USER:-admin}
+    - DASHBOARD_PASS=${DASHBOARD_PASS:-}
+    - VIEWER_USER=${VIEWER_USER:-}
+    - VIEWER_PASS=${VIEWER_PASS:-}
+    - OBSIDIOS_TRUST_PROXY=1
     - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:8080}
+    - OBSIDIOS_DASH_DEBUG=${OBSIDIOS_DASH_DEBUG:-0}
+    # Metrics stay private by default; set a token to scrape them.
+    - OBSIDIOS_METRICS_TOKEN=${OBSIDIOS_METRICS_TOKEN:-}
+    - OBSIDIOS_METRICS_PUBLIC=${OBSIDIOS_METRICS_PUBLIC:-0}
+    - OBSIDIOS_GATEWAY=${OBSIDIOS_GATEWAY:-192.168.1.1}
+    - IPTABLES_BIN=${IPTABLES_BIN:-iptables}
+    - NVD_API_KEY=${NVD_API_KEY:-}
+    - OBSIDIOS_DISCORD_WEBHOOK=${OBSIDIOS_DISCORD_WEBHOOK:-}
+    # AI providers for ORACLE. Passed explicitly so a deployment that uses
+    # orchestrator secrets (not a .env file) still works.
+    - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+    - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+    - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    - OBSIDIOS_AI_FRESHNESS_HOURS=${OBSIDIOS_AI_FRESHNESS_HOURS:-24}
+    # The dashboard can rewrite/reload the ruleset from the FORGE page, so it
+    # needs the same rules path and reload hook as the daemon.
+    - FORGE_RELOAD_CMD=${FORGE_RELOAD_CMD:-suricatasc -c reload-rules /var/run/suricata/suricata-command.socket}
+    - FORGE_RULES_PATH=${FORGE_RULES_PATH:-/app/forge/rules/suricata.rules}
     network_mode: host
-    # Dashboard needs no raw sockets / iptables: least privilege
+    # Dashboard needs NET_ADMIN only for SHIELD rollback: reverting a block
+    # means deleting the iptables rule the daemon installed. Everything else
+    # runs with all capabilities dropped.
+    read_only: true
+    tmpfs:
+    - /tmp:size=128m,mode=1777
     cap_drop:
     - ALL
-    security_opt:
-    - no-new-privileges:true
-    restart: unless-stopped
+    cap_add:
+    - NET_ADMIN
+    - DAC_OVERRIDE
+    - CHOWN
+    - FOWNER
     mem_limit: 1g
     cpus: '1.0'
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: '3'
+    pids_limit: 256
+    logging: *default-logging
     healthcheck:
       test:
       - CMD-SHELL
@@ -102,90 +201,109 @@ services:
       start_period: 30s
     volumes:
     - ./chronicle:/app/chronicle
-    - ./obsidios.py:/app/obsidios.py
-    - ./oracle:/app/oracle
-    - ./echo:/app/echo
-    - ./shield:/app/shield
+    - ./obsidios.py:/app/obsidios.py:ro
+    - ./oracle:/app/oracle:ro
+    - ./echo:/app/echo:ro
+    - ./shield:/app/shield:ro
     - ./forge:/app/forge
-    - ./phantom:/app/phantom
-    - ./iris:/app/iris
-    - ./alerts:/app/alerts
-    - ./dashboard:/app/dashboard
+    - ./phantom:/app/phantom:ro
+    - ./iris:/app/iris:ro
+    - ./alerts:/app/alerts:ro
+    - ./dashboard:/app/dashboard:ro
     - ./logs:/app/logs
-    - ./config:/app/config
-    - ./.env:/app/.env
+    - ./reports:/app/reports:ro
+    - ./config:/app/config:ro
+    - ./.env:/app/.env:ro
+    - suricata_run:/var/run/suricata
+
   obsidios-echo:
     build: .
     user: root
-    cap_add:
-    - NET_RAW
-    security_opt:
-    - no-new-privileges:true
     command:
     - python3
     - obsidios.py
     - echo
     - --iface
-    - eth0
+    - ${OBSIDIOS_CAPTURE_IFACE:-eth0}
     - --duration
     - '60'
     container_name: obsidios-echo
     depends_on:
     - obsidios-daemon
+    <<: *default-hardening
     environment:
     - PYTHONUNBUFFERED=1
+    - PYTHONDONTWRITEBYTECODE=1
     - OBSIDIOS_ENV=${OBSIDIOS_ENV:-dev}
+    - OBSIDIOS_CAPTURE_IFACE=${OBSIDIOS_CAPTURE_IFACE:-}
+    - OBSIDIOS_DISCORD_WEBHOOK=${OBSIDIOS_DISCORD_WEBHOOK:-}
     network_mode: host
-    restart: unless-stopped
+    cap_drop:
+    - ALL
+    cap_add:
+    # ECHO can hand high-confidence anomalies to SHIELD; enforcing the
+    # resulting iptables rules needs NET_ADMIN in the host namespace.
+    - NET_RAW
+    - NET_ADMIN
+    - DAC_OVERRIDE
+    - CHOWN
+    - FOWNER
     mem_limit: 1g
-    logging:
-      driver: json-file
-      options:
-        max-size: 10m
-        max-file: '3'
+    pids_limit: 256
+    logging: *default-logging
     volumes:
     - ./chronicle:/app/chronicle
-    - ./obsidios.py:/app/obsidios.py
-    - ./oracle:/app/oracle
-    - ./echo:/app/echo
-    - ./shield:/app/shield
-    - ./forge:/app/forge
-    - ./phantom:/app/phantom
-    - ./iris:/app/iris
-    - ./alerts:/app/alerts
+    - ./obsidios.py:/app/obsidios.py:ro
+    - ./oracle:/app/oracle:ro
+    - ./echo:/app/echo:ro
+    - ./shield:/app/shield:ro
+    - ./forge:/app/forge:ro
+    - ./phantom:/app/phantom:ro
+    - ./iris:/app/iris:ro
+    - ./alerts:/app/alerts:ro
     - ./logs:/app/logs
-    - ./config:/app/config
-    - ./.env:/app/.env
+    - ./config:/app/config:ro
+    - ./.env:/app/.env:ro
+
   obsidios-sentinel:
     build: .
     user: root
-    cap_add:
-    - NET_RAW
-    - NET_ADMIN
-    security_opt:
-    - no-new-privileges:true
     command:
     - python3
     - obsidios.py
     - sentinel
     - --iface
-    - eth0
+    - ${OBSIDIOS_CAPTURE_IFACE:-eth0}
     container_name: obsidios-sentinel
     depends_on:
     - obsidios-daemon
+    <<: *default-hardening
     environment:
     - PYTHONUNBUFFERED=1
+    - PYTHONDONTWRITEBYTECODE=1
     - OBSIDIOS_ENV=${OBSIDIOS_ENV:-dev}
+    - OBSIDIOS_CAPTURE_IFACE=${OBSIDIOS_CAPTURE_IFACE:-eth0}
+    - OBSIDIOS_GATEWAY=${OBSIDIOS_GATEWAY:-192.168.1.1}
     - SHIELD_DRY_RUN=${SHIELD_DRY_RUN:-1}
     - SHIELD_ALLOWLIST=${SHIELD_ALLOWLIST:-}
+    - SHIELD_MAX_ACTIONS_PER_HOUR=${SHIELD_MAX_ACTIONS_PER_HOUR:-10}
+    - IPTABLES_BIN=${IPTABLES_BIN:-iptables}
+    - OBSIDIOS_DISCORD_WEBHOOK=${OBSIDIOS_DISCORD_WEBHOOK:-}
     network_mode: host
-    restart: unless-stopped
+    cap_drop:
+    - ALL
+    cap_add:
+    - NET_RAW
+    - NET_ADMIN
+    - DAC_OVERRIDE
+    - CHOWN
+    - FOWNER
+    - SETUID
+    - SETGID
     mem_limit: 2g
-    logging:
-      driver: json-file
-      options:
-        max-size: 20m
-        max-file: '5'
+    pids_limit: 512
+    stop_grace_period: 20s
+    logging: *default-logging
     healthcheck:
       test:
       - CMD-SHELL
@@ -196,18 +314,23 @@ services:
       start_period: 30s
     volumes:
     - ./chronicle:/app/chronicle
-    - ./obsidios.py:/app/obsidios.py
-    - ./oracle:/app/oracle
-    - ./sentinel:/app/sentinel
-    - ./shield:/app/shield
-    - ./forge:/app/forge
-    - ./phantom:/app/phantom
-    - ./iris:/app/iris
-    - ./alerts:/app/alerts
+    - ./obsidios.py:/app/obsidios.py:ro
+    - ./oracle:/app/oracle:ro
+    - ./sentinel:/app/sentinel:ro
+    - ./shield:/app/shield:ro
+    - ./forge:/app/forge:ro
+    - ./phantom:/app/phantom:ro
+    - ./iris:/app/iris:ro
+    - ./alerts:/app/alerts:ro
     - ./logs:/app/logs
-    - ./config:/app/config
-    - ./.env:/app/.env
+    - ./config:/app/config:ro
+    - ./.env:/app/.env:ro
     - /var/log/suricata:/var/log/suricata
+    - suricata_run:/var/run/suricata
+
 volumes:
   caddy_config: null
   caddy_data: null
+  # Suricata command socket, shared so FORGE can ask the sensor to reload
+  # after it rewrites the ruleset (suricatasc -c reload-rules).
+  suricata_run: null

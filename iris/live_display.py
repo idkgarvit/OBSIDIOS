@@ -11,6 +11,7 @@ import time
 
 from rich.console import Console
 from rich.live import Live
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import (
     BarColumn,
@@ -25,6 +26,10 @@ from rich.table import Table
 from rich.text import Text
 
 console = Console()
+
+# A /16 sweep can find tens of thousands of hosts; rendering every row on
+# every refresh would peg a CPU. The table shows the most recent ones.
+_MAX_DISPLAYED_HOSTS = 40
 
 
 class ScanDisplay:
@@ -109,7 +114,8 @@ class ScanDisplay:
             host_table.add_column("CVEs",        style="red",    width=8,  justify="right")
             host_table.add_column("OS",          style="dim",    width=30)
 
-            for ip, info in self.host_status.items():
+            shown = list(self.host_status.items())[-_MAX_DISPLAYED_HOSTS:]
+            for ip, info in shown:
                 status = info.get("status", "pending")
                 if status == "scanning":
                     status_str = "[yellow]⠸ scanning...[/]"
@@ -123,11 +129,16 @@ class ScanDisplay:
                     status_str = "[dim]pending[/]"
 
                 host_table.add_row(
-                    ip,
+                    escape(str(ip)),
                     status_str,
                     str(info.get("ports", "-")),
                     str(info.get("cves", "-")),
-                    (info.get("os") or "unknown")[:30],
+                    escape(str(info.get("os") or "unknown")[:30]),
+                )
+            hidden = len(self.host_status) - len(shown)
+            if hidden > 0:
+                host_table.add_row(
+                    f"[dim]... and {hidden} more[/]", "", "", "", "",
                 )
 
             root.add_row(Panel(
@@ -192,7 +203,7 @@ class ScanDisplay:
 
     def start_arp(self, network: str) -> None:
         self._task_arp = self.progress.add_task(
-            f"ARP Sweep  {network}",
+            f"ARP Sweep  {escape(str(network))}",
             total=1,
             status="scanning layer-2...",
         )
@@ -266,9 +277,12 @@ class ScanDisplay:
 
     def finish_cve(self, total_cves: int) -> None:
         if self._task_cve is not None:
+            task = None
+            if 0 <= self._task_cve < len(self.progress.tasks):
+                task = self.progress.tasks[self._task_cve]
             self.progress.update(
                 self._task_cve,
-                completed=self.progress.tasks[self._task_cve].total,
+                completed=task.total if task and task.total is not None else total_cves,
                 status=f"[green]{total_cves} CVEs mapped[/]",
             )
         self.stats["cves"] = total_cves

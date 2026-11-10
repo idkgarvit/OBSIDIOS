@@ -56,13 +56,13 @@ af-packet:
 app-layer:
   protocols:
     tls:
-      enabled: no
+      enabled: yes
     dns:
-      enabled: no
+      enabled: yes
     http:
-      enabled: no
+      enabled: yes
     ssh:
-      enabled: no
+      enabled: yes
 
 stream:
   reassembly:
@@ -78,3 +78,9 @@ logging:
         enabled: no
     - file:
         enabled: no
+
+# Command socket so FORGE can hot-reload the generated ruleset with
+# `suricatasc -c reload-rules <socket>` instead of restarting Suricata.
+unix-command:
+  enabled: yes
+  filename: /var/run/suricata/suricata-command.socket

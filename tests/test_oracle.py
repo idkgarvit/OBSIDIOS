@@ -135,3 +135,72 @@ class TestFallbackRemediation:
         }
         remediation = _fallback_remediation(context)
         assert "CVE-2024-0001" in remediation
+
+class TestValidateExploits:
+    """The exploit validator must not lose rows or fabricate verdicts."""
+
+    class FakeDB:
+        def __init__(self, rows):
+            self.rows = rows
+            self.updates = []
+            self.sql = ""
+
+        async def fetch_all(self, sql, params=()):
+            self.sql = sql
+            return self.rows
+
+        def transaction(self):
+            outer = self
+
+            class _Txn:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *exc):
+                    return False
+
+                async def execute(self, sql, params=()):
+                    outer.updates.append((sql, params))
+
+            return _Txn()
+
+    def test_known_cve_is_marked_verified_with_msf_module(self):
+        import asyncio
+
+        from iris.exploit_validator import validate_exploits
+
+        fake = self.FakeDB([
+            {"port_id": 1, "cve_id": 10, "cve": "CVE-2017-0144",
+             "exploit_status": "THEORETICAL", "msf_module": None},
+        ])
+        result = asyncio.run(validate_exploits(db=fake))
+        assert result == {"validated": 1, "msf_count": 1, "edb_count": 1}
+        assert fake.updates[0][1][0] == "VERIFIED"
+        assert fake.updates[0][1][1] == "exploit/windows/smb/ms17_010_eternalblue"
+
+    def test_unknown_cve_is_left_alone(self):
+        import asyncio
+
+        from iris.exploit_validator import validate_exploits
+
+        fake = self.FakeDB([
+            {"port_id": 1, "cve_id": 10, "cve": "CVE-2099-0001",
+             "exploit_status": "THEORETICAL", "msf_module": None},
+        ])
+        result = asyncio.run(validate_exploits(db=fake))
+        assert result == {"validated": 0, "msf_count": 0, "edb_count": 0}
+        assert fake.updates == []
+
+    def test_null_status_rows_are_still_selected(self):
+        """Legacy NULL exploit_status must not be skipped forever."""
+        import asyncio
+
+        from iris.exploit_validator import validate_exploits
+
+        fake = self.FakeDB([
+            {"port_id": 2, "cve_id": 11, "cve": "CVE-2021-44228",
+             "exploit_status": None, "msf_module": None},
+        ])
+        result = asyncio.run(validate_exploits(db=fake))
+        assert result["validated"] == 1
+        assert "COALESCE" in fake.sql

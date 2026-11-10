@@ -112,6 +112,21 @@ class TestService:
         assert len(out) == 1
         assert out[0]["forge_rule_id"] == 1
 
+    def test_list_suggestions_skips_malformed_rows(self):
+        class RowsDB:
+            async def fetch_all(self, sql, params=()):
+                return [
+                    {"id": 1, "rule_sid": 9000001, "true_positives": 0,
+                     "false_positives": 5, "is_active": 1, "is_deployed": 0},
+                    {"id": None, "true_positives": 0, "false_positives": 5},
+                    {"id": 2, "true_positives": "junk", "false_positives": 5},
+                    {"id": 3, "rule_sid": 9000003, "true_positives": 0,
+                     "false_positives": 4, "is_active": 1, "is_deployed": 0},
+                ]
+
+        out = asyncio.run(svc.list_suggestions(db=RowsDB()))
+        assert [s["forge_rule_id"] for s in out] == [1, 3]
+
 
 @pytest.fixture
 def client():

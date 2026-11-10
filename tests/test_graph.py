@@ -192,3 +192,141 @@ class TestApplyShieldBlock:
         _graph.add_node(2, ip="10.0.0.2", ports=[], cves=[])
         apply_shield_block(1, 2)  # Should not raise
         assert not _graph.has_edge(1, 2)
+
+class TestExploitStatusRisk:
+    def test_verified_exploit_scores_the_same_as_confirmed(self):
+        # The exploit validator writes VERIFIED; it must not be ignored by the
+        # risk model just because the enum value is spelled differently.
+        verified = _compute_risk(_make_node({
+            "cves": [{"effective_cvss": 10.0, "severity": "CRITICAL",
+                      "exploit_status": "VERIFIED"}],
+        }))
+        confirmed = _compute_risk(_make_node({
+            "cves": [{"effective_cvss": 10.0, "severity": "CRITICAL",
+                      "exploit_status": "CONFIRMED_EXPLOITABLE"}],
+        }))
+        assert verified == confirmed == 49.0
+
+    def test_msf_available_and_public_exploit_count_as_weaponised(self):
+        for status in ("MSF_AVAILABLE", "PUBLIC_EXPLOIT"):
+            risk = _compute_risk(_make_node({
+                "cves": [{"effective_cvss": 10.0, "severity": "CRITICAL",
+                          "exploit_status": status}],
+            }))
+            assert risk == 49.0, status
+
+    def test_theoretical_cve_does_not_get_exploit_points(self):
+        risk = _compute_risk(_make_node({
+            "cves": [{"effective_cvss": 10.0, "severity": "CRITICAL",
+                      "exploit_status": "THEORETICAL"}],
+        }))
+        assert risk == 29.0  # 24 CVE + 0 exploit + 5 asset
+
+
+class TestEdgeBuildingSemantics:
+    def test_hardened_destination_gets_no_inbound_edges(self):
+        g = nx.DiGraph()
+        g.add_node(1, ip="10.0.0.1", ports=[{"port": 8080}], cves=[])
+        g.add_node(2, ip="10.0.0.2", ports=[{"port": 8080}], cves=[])
+        _build_edges(g)
+        assert not g.has_edge(1, 2)
+        assert not g.has_edge(2, 1)
+
+    def test_cve_only_destination_gets_edges_from_every_source(self):
+        g = nx.DiGraph()
+        g.add_node(1, ip="10.0.0.1", ports=[], cves=[])
+        g.add_node(2, ip="10.0.0.2", ports=[], cves=[])
+        g.add_node(3, ip="10.0.0.3", ports=[], cves=[{"effective_cvss": 7.0}])
+        _build_edges(g)
+        assert g.has_edge(1, 3)
+        assert g.has_edge(2, 3)
+        assert not g.has_edge(3, 1)
+
+
+class TestRebuildGraphPersistence:
+    def test_risk_updates_are_one_batch_and_cache_is_written(self, monkeypatch):
+        from dashboard.app import run_async
+        from iris import graph_builder as gb
+
+        calls = []
+
+        class FakeDB:
+            async def fetch_all(self, sql, params=()):
+                if "FROM hosts" in sql:
+                    return [{
+                        "id": 1, "ip": "10.0.0.1", "mac": None,
+                        "os_name": "Linux", "risk_score": 0,
+                        "asset_value": 5, "vendor": None,
+                    }]
+                if "FROM ports" in sql:
+                    return [{"host_id": 1, "port": 22, "service": "ssh",
+                             "version": None, "cpe": None}]
+                return []
+
+            async def executemany(self, sql, params):
+                calls.append(("executemany", sql, list(params)))
+
+            async def execute(self, sql, params=()):
+                calls.append(("execute", sql, params))
+
+        monkeypatch.setattr(gb, "db", FakeDB())
+        graph = run_async(gb.rebuild_graph())
+
+        assert graph.number_of_nodes() == 1
+        assert graph.nodes[1]["risk_score"] == 6.0  # 1 port + asset 5
+        batches = [c for c in calls if c[0] == "executemany"]
+        assert len(batches) == 1
+        assert batches[0][2] == [(6.0, 1)]
+        assert any("graph_cache" in str(c[2]) for c in calls if c[0] == "execute")
+
+
+class TestMalformedGraphAttributes:
+    """Graph nodes are built from SQLite rows and must tolerate bad shapes."""
+
+    def test_risk_survives_null_lists_and_non_dict_entries(self):
+        assert _compute_risk({"cves": None, "ports": None,
+                              "asset_value": None}) == 5.0
+        risk = _compute_risk({
+            "cves": [None, "junk", {"effective_cvss": "9.0"}],
+            "ports": [None, "junk"],
+            "asset_value": "10",
+        })
+        # raw = (9/10)*2 = 1.8 → 10.8 + asset 10 = 20.8
+        assert risk == 20.8
+
+    def test_risk_ignores_nan_scores(self):
+        risk = _compute_risk({"cves": [{"effective_cvss": float("nan")}],
+                              "ports": [], "asset_value": 5})
+        assert risk == 5.0
+
+    def test_edges_survive_null_attributes(self):
+        g = nx.DiGraph()
+        g.add_node(1, ip="10.0.0.1", ports=[{"port": 22}], cves=[])
+        g.add_node(2, ip="10.0.0.2", ports=None, cves=None)
+        g.add_node(3, ip="10.0.0.3", ports=[], cves=[{"effective_cvss": "8.0"}])
+        _build_edges(g)
+        assert g.has_edge(1, 3)
+        assert g.has_edge(2, 3)
+
+    def test_target_and_entry_sorting_survive_null_values(self):
+        from iris.graph_builder import _graph
+        _graph.clear()
+        _graph.add_node(1, ip="10.0.0.1", asset_value=None, risk_score=None)
+        _graph.add_node(2, ip="10.0.0.2", asset_value="9", risk_score="70")
+        _graph.add_node(3, ip="10.0.0.3", asset_value=3, risk_score=10)
+
+        targets = get_highest_value_targets(top_n=3)
+        entries = get_most_exposed_entries(top_n=3)
+
+        assert targets[0]["id"] == 2
+        assert entries[0]["id"] == 2
+        _graph.clear()
+
+    def test_export_counts_null_collections_as_zero(self):
+        from iris.graph_builder import _graph
+        _graph.clear()
+        _graph.add_node(1, ip="10.0.0.1", cves=None, ports=None)
+        exported = export_for_dashboard()
+        assert exported["nodes"][0]["cve_count"] == 0
+        assert exported["nodes"][0]["port_count"] == 0
+        _graph.clear()

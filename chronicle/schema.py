@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS hosts (
     first_seen      REAL    NOT NULL DEFAULT (unixepoch('now','subsec')),
     last_seen       REAL    NOT NULL DEFAULT (unixepoch('now','subsec')),
     is_active       INTEGER NOT NULL DEFAULT 1,
+    offline_since   REAL,
     risk_score      REAL    NOT NULL DEFAULT 0.0,
     asset_value     INTEGER NOT NULL DEFAULT 5
 );
@@ -186,10 +187,16 @@ CREATE TABLE IF NOT EXISTS forge_rules (
     mitre_technique TEXT,
     is_deployed     INTEGER DEFAULT 0,
     is_active       INTEGER DEFAULT 1,
+    -- Set when an operator explicitly excludes the rule, so regeneration
+    -- cannot silently re-enable a decision a human made.
+    operator_excluded INTEGER NOT NULL DEFAULT 0,
     true_positives  INTEGER DEFAULT 0,
     false_positives INTEGER DEFAULT 0,
     created_at      REAL    NOT NULL DEFAULT (unixepoch('now','subsec')),
-    last_fired_at   REAL
+    last_fired_at   REAL,
+    -- Set only when this rule was included in a ruleset that was actually
+    -- written for the sensor; NULL means it has never reached Suricata.
+    delivered_at    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_rules_deployed ON forge_rules(is_deployed, is_active);
 CREATE INDEX IF NOT EXISTS idx_rules_sid      ON forge_rules(rule_sid);
@@ -248,6 +255,7 @@ CREATE TABLE IF NOT EXISTS shield_actions (
     taken_at      REAL    NOT NULL DEFAULT (unixepoch('now','subsec')),
     action_type   TEXT    NOT NULL,
     target_ip     TEXT,
+    src_ip        TEXT,
     target_port   INTEGER,
     rule_applied  TEXT,
     trigger_type  TEXT,
@@ -336,14 +344,57 @@ INSERT OR IGNORE INTO system_settings (key, value) VALUES ('target_network', '')
 INSERT OR IGNORE INTO system_settings (key, value) VALUES ('scan_profile', 'FAST');
 INSERT OR IGNORE INTO system_settings (key, value) VALUES ('scan_interface', '');
 
+-- Atomic allocator for FORGE Suricata SIDs (unique across processes/runs).
+CREATE TABLE IF NOT EXISTS forge_sid_sequence (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    next_sid INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO forge_sid_sequence (id, next_sid)
+    SELECT 1, COALESCE(MAX(rule_sid), 8999999) + 1 FROM forge_rules;
+
+-- Delivery audit trail: one row per attempt to write/reload the ruleset.
+CREATE TABLE IF NOT EXISTS forge_delivery (
+    id            INTEGER PRIMARY KEY,
+    attempted_at  REAL    NOT NULL,
+    ok            INTEGER NOT NULL,
+    rule_count    INTEGER NOT NULL DEFAULT 0,
+    path          TEXT,
+    error         TEXT,
+    reload_ok     INTEGER,
+    reload_output TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_forge_delivery_at ON forge_delivery(attempted_at DESC);
+
+-- Operator action audit trail. One row per state-changing action, with the
+-- authenticated actor, role and client address. Append-only by convention.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id         INTEGER PRIMARY KEY,
+    ts         REAL    NOT NULL DEFAULT (unixepoch('now','subsec')),
+    actor      TEXT    NOT NULL,
+    role       TEXT    NOT NULL DEFAULT '',
+    action     TEXT    NOT NULL,
+    target     TEXT,
+    detail     TEXT,
+    ip         TEXT,
+    outcome    TEXT    NOT NULL DEFAULT 'success'
+);
+CREATE INDEX IF NOT EXISTS idx_audit_ts    ON audit_log(ts DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_log(actor, ts DESC);
+
 -- Schema version for forward migrations (Postgres path keeps same version).
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    jti         TEXT PRIMARY KEY,
+    expires_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_revoked_tokens_expires ON revoked_tokens(expires_at);
+
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at REAL NOT NULL DEFAULT (unixepoch('now','subsec'))
 );
-INSERT OR IGNORE INTO schema_version (version) VALUES (1);
+INSERT OR IGNORE INTO schema_version (version) VALUES (5);
 """
 
 # Current schema revision. Bump + add a migration step in chronicle/db.py
 # when changing SCHEMA_SQL. Postgres migration must replay the same versions.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 5

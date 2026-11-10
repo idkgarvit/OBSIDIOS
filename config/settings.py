@@ -4,9 +4,10 @@ Central configuration for OBSIDIOS.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 BASE_DIR    = Path(__file__).resolve().parent.parent
@@ -14,13 +15,82 @@ DB_PATH     = BASE_DIR / "chronicle" / "obsidios.db"
 REPORTS_DIR = BASE_DIR / "reports" / "output"
 LOGS_DIR    = BASE_DIR / "logs"
 
+
+def load_env_file(path: Path) -> None:
+    """Load ``KEY=VALUE`` pairs from ``.env`` into ``os.environ``.
+
+    pydantic-settings reads ``.env`` for its own models, but modules that read
+    ``os.environ`` directly (dashboard credentials, viewer account,
+    ``FORGE_RELOAD_CMD``, ``SHIELD_*``) silently ignored the documented
+    ``.env`` workflow. Real environment variables win, so container and
+    orchestrator configuration is never overridden by a stray file.
+
+    Supports the syntax people actually write: comments, ``export`` prefixes,
+    single/double quoted values and trailing ``# comments``.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or not key.replace("_", "").isalnum():
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        os.environ.setdefault(key, value)
+
+
+load_env_file(BASE_DIR / ".env")
+
+
+def ensure_dir(path: Path) -> bool:
+    """Create a runtime directory, tolerating a read-only filesystem.
+
+    The containers bind-mount reports/logs read-only in several services, and a
+    fresh clone has no reports/output directory because it is git-ignored.
+    Raising here used to take down every service at import time; a missing
+    output directory is an operational problem, not a reason to stop IDS.
+    """
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return True
+    except OSError as exc:
+        if os.environ.get("OBSIDIOS_STRICT_DIRS") == "1":
+            raise
+        import warnings
+        warnings.warn(
+            f"[OBSIDIOS] Cannot create {path}: {exc}. Writes to this directory "
+            "will fail; mount it read-write or set OBSIDIOS_STRICT_DIRS=1 to "
+            "fail fast.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return False
+
+
 for _d in (DB_PATH.parent, REPORTS_DIR, LOGS_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
+    ensure_dir(_d)
 
 
+# pydantic-settings v2 does not understand Pydantic v1's ``Field(env=...)``:
+# it silently ignores it and looks up the upper-cased field name instead. Every
+# documented variable below (``OBSIDIOS_TARGET``, ``SHIELD_DRY_RUN``, …) was
+# therefore dead configuration — Compose wired it, the app scanned the default
+# network anyway. ``validation_alias`` is the v2 spelling and is honoured by
+# both the environment and ``.env`` sources.
 class ScanSettings(BaseSettings):
-    target_network:         str   = Field("192.168.1.0/24", env="OBSIDIOS_TARGET")
-    scan_interval_seconds:  int   = Field(3600,             env="OBSIDIOS_SCAN_INTERVAL")
+    target_network:         str   = Field("192.168.1.0/24", validation_alias="OBSIDIOS_TARGET")
+    scan_interval_seconds:  int   = Field(3600,             validation_alias="OBSIDIOS_SCAN_INTERVAL")
     # ── Scan Profiles ─────────────────────────────────────────────────────
     # Switch profiles by setting OBSIDIOS_SCAN_PROFILE in .env
     # FAST   → lab/trusted network, no firewall     (~30 sec)
@@ -34,8 +104,8 @@ class ScanSettings(BaseSettings):
         "STEALTH_IDLE": "-sS -sV -O -Pn -f --mtu 24 --source-port 53 -T2 --scan-delay 3s --max-retries 2 --top-ports 1000 -sI ZOMBIE",
     }
 
-    scan_profile:   str = Field("FAST",  env="OBSIDIOS_SCAN_PROFILE")
-    nmap_arguments: str = Field("",      env="OBSIDIOS_NMAP_ARGS")
+    scan_profile:   str = Field("FAST",  validation_alias="OBSIDIOS_SCAN_PROFILE")
+    nmap_arguments: str = Field("",      validation_alias="OBSIDIOS_NMAP_ARGS")
 
     @property
     def active_nmap_args(self) -> str:
@@ -49,80 +119,93 @@ class ScanSettings(BaseSettings):
             args = args.replace("ZOMBIE", self.zombie_host)
         return args
 
-    nmap_top_ports:    int   = Field(1000,             env="OBSIDIOS_NMAP_TOP_PORTS")
-    scan_concurrency:  int   = Field(20,               env="OBSIDIOS_SCAN_CONCURRENCY")
-    arp_timeout:       float = Field(2.0,              env="OBSIDIOS_ARP_TIMEOUT")
-    zombie_host:       str   = Field("",               env="OBSIDIOS_ZOMBIE_HOST")
-    nvd_api_key:       str   = Field("",               env="NVD_API_KEY")
-    wireless_interface: str = Field("wlan0",         env="OBSIDIOS_WLAN_IFACE")
-    enable_wireless:   bool  = Field(True,             env="OBSIDIOS_WIRELESS")
+    nmap_top_ports:    int   = Field(1000,             validation_alias="OBSIDIOS_NMAP_TOP_PORTS")
+    scan_concurrency:  int   = Field(20,               validation_alias="OBSIDIOS_SCAN_CONCURRENCY")
+    arp_timeout:       float = Field(2.0,              validation_alias="OBSIDIOS_ARP_TIMEOUT")
+    zombie_host:       str   = Field("",               validation_alias="OBSIDIOS_ZOMBIE_HOST")
+    nvd_api_key:       str   = Field("",               validation_alias="NVD_API_KEY")
+    wireless_interface: str = Field("wlan0",         validation_alias="OBSIDIOS_WLAN_IFACE")
+    enable_wireless:   bool  = Field(True,             validation_alias="OBSIDIOS_WIRELESS")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 class DatabaseSettings(BaseSettings):
     db_path:              Path = DB_PATH
-    cache_size_kb:        int  = Field(65536,     env="OBSIDIOS_DB_CACHE_KB")
-    mmap_size_bytes:      int  = Field(268435456, env="OBSIDIOS_MMAP")
-    wal_autocheckpoint:   int  = Field(1000,      env="OBSIDIOS_WAL_CHECKPOINT")
+    cache_size_kb:        int  = Field(65536,     validation_alias="OBSIDIOS_DB_CACHE_KB")
+    mmap_size_bytes:      int  = Field(268435456, validation_alias="OBSIDIOS_MMAP")
+    wal_autocheckpoint:   int  = Field(1000,      validation_alias="OBSIDIOS_WAL_CHECKPOINT")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 class AISettings(BaseSettings):
-    anthropic_api_key: str = Field("", env="ANTHROPIC_API_KEY")
-    nvidia_api_key:    str = Field("", env="NVIDIA_API_KEY")
-    nvidia_base_url:   str = Field("https://integrate.api.nvidia.com/v1", env="NVIDIA_BASE_URL")
-    nvidia_model:      str = Field("meta/llama-3.1-8b-instruct", env="NVIDIA_MODEL")
-    openai_api_key:    str = Field("", env="OPENAI_API_KEY")
-    openai_base_url:   str = Field("https://openrouter.ai/api/v1", env="OPENAI_BASE_URL")
-    openai_model:      str = Field("liquid/lfm-2.5-1.2b-instruct:free", env="OPENAI_MODEL")
-    model:             str = Field("claude-opus-4-5", env="OBSIDIOS_AI_MODEL")
-    max_tokens:        int = Field(4096, env="OBSIDIOS_AI_MAX_TOKENS")
+    anthropic_api_key: str = Field("", validation_alias="ANTHROPIC_API_KEY")
+    nvidia_api_key:    str = Field("", validation_alias="NVIDIA_API_KEY")
+    nvidia_base_url:   str = Field("https://integrate.api.nvidia.com/v1", validation_alias="NVIDIA_BASE_URL")
+    nvidia_model:      str = Field("meta/llama-3.1-8b-instruct", validation_alias="NVIDIA_MODEL")
+    openai_api_key:    str = Field("", validation_alias="OPENAI_API_KEY")
+    openai_base_url:   str = Field("https://openrouter.ai/api/v1", validation_alias="OPENAI_BASE_URL")
+    openai_model:      str = Field("liquid/lfm-2.5-1.2b-instruct:free", validation_alias="OPENAI_MODEL")
+    model:             str = Field("claude-opus-4-5", validation_alias="OBSIDIOS_AI_MODEL")
+    max_tokens:        int = Field(4096, validation_alias="OBSIDIOS_AI_MAX_TOKENS")
     model_config = {"env_file": ".env", "extra": "ignore"}
+
+    @model_validator(mode="after")
+    def _openrouter_alias(self):
+        """Accept the OPENROUTER_API_KEY name the docs have always advertised.
+
+        The field only read OPENAI_API_KEY, so an operator who followed
+        `.env.example` got the template fallback with no indication why.
+        """
+        if not self.openai_api_key:
+            alias = os.environ.get("OPENROUTER_API_KEY", "").strip()
+            if alias:
+                self.openai_api_key = alias
+        return self
 
 
 class AlertSettings(BaseSettings):
-    discord_webhook_url: str = Field("", env="OBSIDIOS_DISCORD_WEBHOOK")
-    telegram_bot_token:  str = Field("", env="OBSIDIOS_TELEGRAM_TOKEN")
-    telegram_chat_id:    str = Field("", env="OBSIDIOS_TELEGRAM_CHAT")
+    discord_webhook_url: str = Field("", validation_alias="OBSIDIOS_DISCORD_WEBHOOK")
+    telegram_bot_token:  str = Field("", validation_alias="OBSIDIOS_TELEGRAM_TOKEN")
+    telegram_chat_id:    str = Field("", validation_alias="OBSIDIOS_TELEGRAM_CHAT")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 class MetasploitSettings(BaseSettings):
-    host:     str  = Field("127.0.0.1", env="MSF_HOST")
-    port:     int  = Field(55553,       env="MSF_PORT")
-    password: str  = Field("",           env="MSF_PASSWORD")
-    ssl:      bool = Field(False,       env="MSF_SSL")
+    host:     str  = Field("127.0.0.1", validation_alias="MSF_HOST")
+    port:     int  = Field(55553,       validation_alias="MSF_PORT")
+    password: str  = Field("",           validation_alias="MSF_PASSWORD")
+    ssl:      bool = Field(False,       validation_alias="MSF_SSL")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 class OSINTSettings(BaseSettings):
-    shodan_api_key: str = Field("", env="SHODAN_API_KEY")
-    hibp_api_key:   str = Field("", env="HIBP_API_KEY")
+    shodan_api_key: str = Field("", validation_alias="SHODAN_API_KEY")
+    hibp_api_key:   str = Field("", validation_alias="HIBP_API_KEY")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 class DashboardSettings(BaseSettings):
-    host:       str  = Field("0.0.0.0", env="OBSIDIOS_DASH_HOST")
-    port:       int  = Field(8080,       env="OBSIDIOS_DASH_PORT")
-    debug:      bool = Field(False,      env="OBSIDIOS_DASH_DEBUG")
-    secret_key: str  = Field("", env="OBSIDIOS_SECRET")
+    host:       str  = Field("127.0.0.1", validation_alias="OBSIDIOS_DASH_HOST")
+    port:       int  = Field(8080,        validation_alias="OBSIDIOS_DASH_PORT")
+    debug:      bool = Field(False,       validation_alias="OBSIDIOS_DASH_DEBUG")
+    secret_key: str  = Field("",          validation_alias="OBSIDIOS_SECRET")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 class SecuritySettings(BaseSettings):
     """Company-infra hardening knobs. Safe defaults: fail closed."""
-    env: str = Field("dev", env="OBSIDIOS_ENV")  # dev | production
-    allow_public_scan: bool = Field(False, env="OBSIDIOS_ALLOW_PUBLIC_SCAN")
-    cors_origins: str = Field("http://localhost:8080", env="CORS_ORIGINS")
-    dashboard_user: str = Field("admin", env="DASHBOARD_USER")
+    env: str = Field("dev", validation_alias="OBSIDIOS_ENV")  # dev | production
+    allow_public_scan: bool = Field(False, validation_alias="OBSIDIOS_ALLOW_PUBLIC_SCAN")
+    cors_origins: str = Field("http://localhost:8080", validation_alias="CORS_ORIGINS")
+    dashboard_user: str = Field("admin", validation_alias="DASHBOARD_USER")
     # DASHBOARD_PASS is read via os.environ in dashboard/app.py to avoid logging;
     # kept here only for prod validation (presence check).
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property
     def is_production(self) -> bool:
-        # Read env directly: pydantic-settings v2 ignores Field(env=...) so
-        # self.env may be stale. Env var is source of truth for safety.
+        # Read env directly as well: a runtime override should beat the value
+        # captured when this singleton was built at import time.
         import os
         raw = os.environ.get("OBSIDIOS_ENV", self.env or "dev")
         return raw.strip().lower() in ("prod", "production")
@@ -130,10 +213,10 @@ class SecuritySettings(BaseSettings):
 
 class ShieldSettings(BaseSettings):
     """SHIELD safety: default dry-run so company infra can't be DoS'd."""
-    dry_run: bool = Field(True, env="SHIELD_DRY_RUN")
-    allowlist: str = Field("", env="SHIELD_ALLOWLIST")  # comma-separated IPs/CIDRs, e.g. "192.168.1.1,192.168.1.2/32"
-    auto_quarantine: bool = Field(False, env="SHIELD_AUTO_QUARANTINE")
-    max_actions_per_hour: int = Field(10, env="SHIELD_MAX_ACTIONS_PER_HOUR")
+    dry_run: bool = Field(True, validation_alias="SHIELD_DRY_RUN")
+    allowlist: str = Field("", validation_alias="SHIELD_ALLOWLIST")  # comma-separated IPs/CIDRs, e.g. "192.168.1.1,192.168.1.2/32"
+    auto_quarantine: bool = Field(False, validation_alias="SHIELD_AUTO_QUARANTINE")
+    max_actions_per_hour: int = Field(10, validation_alias="SHIELD_MAX_ACTIONS_PER_HOUR")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
@@ -152,7 +235,11 @@ def _resolve_secret() -> str:
     return ""
 
 
-_WEAK_SECRETS = {"", "changeme", "obsidios-secret-fallback-for-dev", "obsidios123", "admin", "password"}
+_WEAK_SECRETS = {
+    "", "changeme", "obsidios123", "admin", "password",
+    "obsidios-secret-fallback-for-dev",
+    "obsidios-secret-fallback-for-dev-only-do-not-use-in-prod",
+}
 
 
 def validate_prod_config() -> list[str]:
@@ -169,7 +256,8 @@ def validate_prod_config() -> list[str]:
         errors.append("DASHBOARD_PASS must be changed from default in production")
     if os.environ.get("OBSIDIOS_DASH_DEBUG", "").strip().lower() in ("1", "true", "yes"):
         errors.append("OBSIDIOS_DASH_DEBUG must be false in production")
-    # Target guardrail — read env directly (pydantic Field(env=) is deprecated/ignored on v2)
+    # Target guardrail — read env directly so a runtime change wins over the
+    # value captured when the settings singleton was imported.
     target = os.environ.get("OBSIDIOS_TARGET", "")
     if not target:
         try:
@@ -183,7 +271,10 @@ def validate_prod_config() -> list[str]:
 
 
 def validate_target_cidr(cidr: str) -> tuple[bool, str]:
-    """Guardrails: deny 0.0.0.0/0, overly broad </8, and public ranges without explicit opt-in."""
+    """Guardrails: deny 0.0.0.0/0, overly broad ranges, and public ranges
+    without explicit opt-in. Defaults to a minimum /16 to prevent a typo from
+    turning a company scan into an internet-wide sweep.
+    """
     import ipaddress
     import os
     if not cidr:
@@ -194,14 +285,56 @@ def validate_target_cidr(cidr: str) -> tuple[bool, str]:
         return False, f"invalid CIDR: {e}"
     if net.prefixlen == 0:
         return False, "0.0.0.0/0 internet-wide scan is never allowed"
-    if net.prefixlen < 8:
-        return False, f"/{net.prefixlen} too broad (min /8)"
+    broad_ok = os.environ.get("OBSIDIOS_ALLOW_BROAD_SCAN", "").strip().lower() in ("1", "true", "yes")
+    min_prefix = 8 if broad_ok else 16
+    if net.prefixlen < min_prefix:
+        return False, (f"/{net.prefixlen} too broad (min /{min_prefix}); "
+                       "set OBSIDIOS_ALLOW_BROAD_SCAN=1 only with written authorization")
+    if net.is_loopback or net.is_multicast or net.is_link_local:
+        return False, "loopback/link-local/multicast ranges are not valid scan targets"
     allow_public = os.environ.get("OBSIDIOS_ALLOW_PUBLIC_SCAN", "").strip().lower() in ("1", "true", "yes")
     try:
         if not net.is_private and not allow_public:
             return False, "public range requires OBSIDIOS_ALLOW_PUBLIC_SCAN=1 + written authorization"
     except Exception:
         pass
+    return True, "ok"
+
+
+_DENIED_NMAP_OPTIONS = (
+    "--script", "--datadir", "-il", "-ir", "--resume", "--stylesheet",
+    "--webxml", "--interactive", "--proxies", "--servicedb", "--versiondb",
+)
+_SHELL_METACHARS = set(";&|`$<>\n\r")
+
+
+def validate_nmap_arguments(args: str) -> tuple[bool, str]:
+    """Reject nmap flags that write files, load scripts, or read target lists.
+
+    The active profile is operator-controlled, but an enterprise deployment
+    must not turn OBSIDIOS_NMAP_ARGS into arbitrary file/script execution.
+    """
+    raw = args or ""
+    if any(ch in _SHELL_METACHARS for ch in raw):
+        return False, "nmap arguments contain shell metacharacters"
+    try:
+        import shlex
+        tokens = shlex.split(raw)
+    except ValueError as e:
+        return False, f"unparseable nmap arguments: {e}"
+    for tok in tokens:
+        lower = tok.lower()
+        if tok.startswith("-o") and tok != "-O":
+            return False, f"nmap output option not allowed: {tok}"
+        for opt in _DENIED_NMAP_OPTIONS:
+            if lower == opt or lower.startswith(opt + "="):
+                return False, f"nmap option not allowed: {tok}"
+            # Short options also accept an attached value (`-iL/etc/passwd`).
+            # Matching only the spaced form let an operator read an arbitrary
+            # target file — or `-iR100` sweep random internet hosts — while the
+            # guard reported "ok".
+            if not opt.startswith("--") and lower.startswith(opt):
+                return False, f"nmap option not allowed: {tok}"
     return True, "ok"
 
 

@@ -23,7 +23,20 @@ class TestProbes:
         assert rv.status_code in (200, 503)
         assert "status" in rv.get_json()
 
-    def test_metrics_no_auth_prometheus_format(self, client):
+    def test_metrics_requires_token(self, client, monkeypatch):
+        monkeypatch.setenv("OBSIDIOS_METRICS_PUBLIC", "0")
+        monkeypatch.setenv("OBSIDIOS_METRICS_TOKEN", "metrics-test-token")
+        assert client.get("/metrics").status_code == 401
+        assert client.get("/metrics", headers={
+            "Authorization": "Bearer wrong-token"}).status_code == 401
+        rv = client.get("/metrics", headers={
+            "Authorization": "Bearer metrics-test-token"})
+        assert rv.status_code in (200, 503)
+        body = rv.data.decode()
+        assert "obsidios_hosts_active" in body or body.startswith("# error")
+
+    def test_metrics_public_opt_in(self, client, monkeypatch):
+        monkeypatch.setenv("OBSIDIOS_METRICS_PUBLIC", "1")
         rv = client.get("/metrics")
         assert rv.status_code in (200, 503)
         body = rv.data.decode()
