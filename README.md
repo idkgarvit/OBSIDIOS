@@ -1,19 +1,10 @@
 <div align="center">
-  <pre>
+  <img src="docs/banner.png" alt="OBSIDIOS — Autonomous Predictive Network Security" width="100%">
 
- █████╗  ██████╗  ██████╗  ██╗ ██████╗  ██╗  █████╗  ██████╗
-██╔══██╗ ██╔══██╗ ██╔════╝ ██║ ██╔══██╗ ██║ ██╔══██╗ ██╔════╝
-██║  ██║ ██████╔╝ ██████╗  ██║ ██║  ██║ ██║ ██║  ██║ ██████╗
-██║  ██║ ██╔══██╗ ╚═══██╗  ██║ ██║  ██║ ██║ ██║  ██║ ╚═══██╗
-╚██████╔ ██████╔╝ ██████╔╝ ██║ ██████╔╝ ██║ ╚██████╔╝██████╔╝
- ╚═════╝  ╚═════╝  ╚═════╝  ╚═╝ ╚═════╝  ╚═╝  ╚═════╝  ╚═════╝
-
-  </pre>
-
-  <h1>OBSIDIOS — Autonomous Predictive Network Security Platform</h1>
+  <h1>Autonomous Predictive Network Security Platform</h1>
 
   <p>
-    <strong>OBSIDIOS · Real-time host discovery · AI-driven vulnerability mapping · Attack path simulation · 3D tactical dashboard · Automated defense</strong>
+    <strong>Real-time host discovery · AI-driven vulnerability mapping · Attack path simulation · 3D tactical dashboard · Automated defense</strong>
   </p>
 
   <p>
@@ -358,7 +349,7 @@ Automatic failover: **NVIDIA** (`meta/llama-3.1-8b-instruct`, free tier) → **O
 ### 3D Tactical Dashboard
 
 <p align="center">
-  <img src="docs/dashboard.png" alt="OBSIDIOS Dashboard" width="700">
+  <img src="docs/dashboard.png" alt="OBSIDIOS Dashboard — operational overview with 3D network topology" width="100%">
 </p>
 
 Three.js-based 3D network topology with gravity-bound nodes, attack-highlighted edges, and host color-by-risk. Real-time network activity (rx/tx/latency) is polled while the page is open.
@@ -372,10 +363,10 @@ Configurable retention of **1–3650 days** (default 30). Auto-prune runs at sca
 ## Workflow
 
 <p align="center">
-  <img src="docs/workflow.png" alt="OBSIDIOS Workflow" width="700">
+  <img src="docs/workflow.svg" alt="OBSIDIOS workflow — scan cycle and runtime defense loop" width="100%">
 </p>
 
-> *Click and open the image in a new tab for full resolution.*
+> *The diagram is an SVG: open it directly or zoom in for full resolution.*
 
 ## Troubleshooting
 
