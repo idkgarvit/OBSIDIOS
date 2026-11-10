@@ -32,7 +32,7 @@ Open a GitHub issue with:
 
 ## Code Style
 
-- Python 3.11+ with type hints (`from __future__ import annotations`)
+- Python 3.13 with type hints (`from __future__ import annotations`)
 - Use `loguru` for logging (not `print`)
 - Async-first: use `async/await`, avoid blocking calls in async contexts
 - SQL: use parameterized queries (`?` placeholders), never f-string interpolation

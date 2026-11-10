@@ -31,7 +31,6 @@ class TestScanSettings:
         monkeypatch.setenv("OBSIDIOS_SCAN_INTERVAL", "123")
         monkeypatch.setenv("OBSIDIOS_SCAN_PROFILE", "GHOST")
         monkeypatch.setenv("OBSIDIOS_SCAN_CONCURRENCY", "7")
-        monkeypatch.setenv("OBSIDIOS_ARP_TIMEOUT", "9.5")
         monkeypatch.setenv("OBSIDIOS_WIRELESS", "0")
 
         scan = ScanSettings(_env_file=None)
@@ -40,7 +39,6 @@ class TestScanSettings:
         assert scan.scan_interval_seconds == 123
         assert scan.scan_profile == "GHOST"
         assert scan.scan_concurrency == 7
-        assert scan.arp_timeout == 9.5
         assert scan.enable_wireless is False
 
     def test_nmap_override_wins_over_the_profile(self, monkeypatch):
@@ -97,26 +95,21 @@ class TestOtherSettings:
         assert (alerts.telegram_bot_token, alerts.telegram_chat_id) == (
             "token", "chat")
 
-    def test_dashboard_bind_and_debug_are_read_from_documented_names(
-            self, monkeypatch):
+    def test_dashboard_bind_is_read_from_documented_names(self, monkeypatch):
         monkeypatch.setenv("OBSIDIOS_DASH_HOST", "0.0.0.0")
         monkeypatch.setenv("OBSIDIOS_DASH_PORT", "9099")
-        monkeypatch.setenv("OBSIDIOS_DASH_DEBUG", "1")
 
         dash = DashboardSettings(_env_file=None)
 
         assert dash.host == "0.0.0.0"
         assert dash.port == 9099
-        assert dash.debug is True
 
     def test_ai_model_override_is_honoured(self, monkeypatch):
         monkeypatch.setenv("OBSIDIOS_AI_MODEL", "claude-sonnet-4-5")
-        monkeypatch.setenv("OBSIDIOS_AI_MAX_TOKENS", "1234")
 
         ai = AISettings(_env_file=None)
 
         assert ai.model == "claude-sonnet-4-5"
-        assert ai.max_tokens == 1234
 
 
 class TestDotenvSource:

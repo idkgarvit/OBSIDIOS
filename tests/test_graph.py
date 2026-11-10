@@ -4,7 +4,6 @@ import networkx as nx
 from iris.graph_builder import (
     _build_edges,
     _compute_risk,
-    apply_shield_block,
     export_for_dashboard,
     get_highest_value_targets,
     get_most_exposed_entries,
@@ -175,23 +174,6 @@ class TestGetMostExposedEntries:
         entries = get_most_exposed_entries()
         assert entries[0]["risk_score"] == 90
 
-
-class TestApplyShieldBlock:
-    def test_removes_edge(self):
-        from iris.graph_builder import _graph
-        _graph.clear()
-        _graph.add_edge(1, 2)
-        assert _graph.has_edge(1, 2)
-        apply_shield_block(1, 2)
-        assert not _graph.has_edge(1, 2)
-
-    def test_noop_if_no_edge(self):
-        from iris.graph_builder import _graph
-        _graph.clear()
-        _graph.add_node(1, ip="10.0.0.1", ports=[], cves=[])
-        _graph.add_node(2, ip="10.0.0.2", ports=[], cves=[])
-        apply_shield_block(1, 2)  # Should not raise
-        assert not _graph.has_edge(1, 2)
 
 class TestExploitStatusRisk:
     def test_verified_exploit_scores_the_same_as_confirmed(self):

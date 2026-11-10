@@ -92,11 +92,6 @@ def get_local_ip(interface: str = None) -> str | None:
     return _interface_ipv4(get_default_interface())
 
 
-def get_interface_ip(interface: str) -> str | None:
-    """Get IP address for a specific interface."""
-    return get_local_ip(interface)
-
-
 def detect_network() -> dict[str, Any]:
     """
     Auto-detect the current network.
@@ -206,39 +201,3 @@ def _guess_cidr(local_ip: str) -> str:
         return str(ipaddress.IPv4Network(f"{ip}/24", strict=False))
     except Exception:
         return "192.168.1.0/24"
-
-
-def list_interfaces() -> list[dict[str, Any]]:
-    """List all available network interfaces."""
-    interfaces = []
-    try:
-        result = subprocess.run(
-            ['ip', '-o', 'link', 'show'],
-            capture_output=True, text=True, timeout=5
-        )
-        for line in result.stdout.splitlines():
-            if ':' in line:
-                parts = line.split(':')
-                if len(parts) < 2:
-                    continue
-                # `ip -o link` prints veth names as "eth0@if42".
-                if_name = parts[1].strip().split('@', 1)[0]
-                if if_name and if_name != 'lo' and _valid_iface(if_name):
-                    ip = get_local_ip(if_name)
-                    interfaces.append({
-                        "name": if_name,
-                        "ip": ip,
-                        "status": "up" if 'UP' in line else "down"
-                    })
-    except Exception:
-        pass
-    return interfaces
-
-
-def validate_cidr(cidr: str) -> bool:
-    """Validate CIDR notation."""
-    try:
-        ipaddress.IPv4Network(cidr, strict=False)
-        return True
-    except Exception:
-        return False

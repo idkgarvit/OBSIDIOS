@@ -7,7 +7,6 @@ the network offline when discovery itself failed.
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 
@@ -136,21 +135,3 @@ async def heartbeat_once(target: str, socketio=None) -> dict:
         "up": len(new_ips),
         "down": len(gone_ips),
     }
-
-
-async def run_heartbeat_loop(target: str, socketio=None) -> None:
-    """Continuous 15 s pulse to detect host presence changes."""
-    ok, reason = wired_scanner.validate_target_cidr(target)
-    if not ok:
-        logger.error(
-            f"[IRIS/HEARTBEAT] Refusing invalid target {target!r}: {reason}"
-        )
-        return
-
-    logger.info(f"[IRIS/HEARTBEAT] Starting real-time pulse on {target}")
-    while True:
-        try:
-            await heartbeat_once(target, socketio=socketio)
-        except Exception as exc:
-            logger.error(f"[IRIS/HEARTBEAT] Loop error: {exc}")
-        await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)

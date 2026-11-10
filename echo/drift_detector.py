@@ -677,23 +677,3 @@ async def run_echo(
 
     logger.success(f"[ECHO] Window processed: {len(snapshot)} hosts, {len(anomalies)} anomalies")
     return anomalies
-
-
-async def get_anomaly_summary() -> dict:
-    """Get summary of all anomalies stored in CHRONICLE."""
-    rows = await db.fetch_all(
-        """SELECT a.anomaly_type, COUNT(*) as cnt,
-                  AVG(a.confidence) as avg_conf,
-                  h.ip
-           FROM anomalies a JOIN hosts h ON h.id = a.host_id
-           WHERE a.acknowledged = 0
-           GROUP BY a.anomaly_type, h.ip
-           ORDER BY avg_conf DESC"""
-    )
-    total = await db.fetch_val(
-        "SELECT COUNT(*) FROM anomalies WHERE acknowledged = 0", default=0
-    )
-    return {
-        "total": int(total or 0),
-        "by_type": [dict(r) for r in rows],
-    }

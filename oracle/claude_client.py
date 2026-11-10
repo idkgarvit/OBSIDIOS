@@ -197,11 +197,6 @@ async def _scan_age() -> float | None:
     return max(0.0, time.time() - row["finished_at"])
 
 
-async def _has_recent_scan() -> bool:
-    age = await _scan_age()
-    return age is not None and age < _freshness_window()
-
-
 async def _ai_data_guard(context: dict) -> str | None:
     """Return the operator-facing reason ORACLE has nothing to analyse."""
     if not context.get("hosts"):

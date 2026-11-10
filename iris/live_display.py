@@ -61,8 +61,6 @@ class ScanDisplay:
             "hosts":    0,
             "ports":    0,
             "cves":     0,
-            "paths":    0,
-            "rules":    0,
         }
 
         # Task IDs
@@ -70,8 +68,6 @@ class ScanDisplay:
         self._task_nmap:  TaskID | None = None
         self._task_cve:   TaskID | None = None
         self._task_graph: TaskID | None = None
-        self._task_phantom: TaskID | None = None
-        self._task_forge: TaskID | None = None
 
         self._live: Live | None = None
 
@@ -153,8 +149,6 @@ class ScanDisplay:
         stats_table.add_column(justify="center")
         stats_table.add_column(justify="center")
         stats_table.add_column(justify="center")
-        stats_table.add_column(justify="center")
-        stats_table.add_column(justify="center")
 
         def stat(val: int, label: str, color: str) -> Text:
             t = Text()
@@ -166,8 +160,6 @@ class ScanDisplay:
             stat(self.stats["hosts"], "HOSTS",      "cyan"),
             stat(self.stats["ports"], "OPEN PORTS", "yellow"),
             stat(self.stats["cves"],  "CVEs",       "red"),
-            stat(self.stats["paths"], "KILL CHAINS","magenta"),
-            stat(self.stats["rules"], "IDS RULES",  "green"),
         )
 
         root.add_row(Panel(
@@ -264,17 +256,6 @@ class ScanDisplay:
         )
         self._refresh()
 
-    def cve_progress(self, done: int, total: int, ip: str | None = None) -> None:
-        if self._task_cve is not None:
-            self.progress.update(
-                self._task_cve,
-                completed=done,
-                status=f"{done}/{total} services",
-            )
-        if ip and ip in self.host_status:
-            self.host_status[ip]["status"] = "cve_lookup"
-        self._refresh()
-
     def finish_cve(self, total_cves: int) -> None:
         if self._task_cve is not None:
             task = None
@@ -291,12 +272,7 @@ class ScanDisplay:
                 self.host_status[ip]["status"] = "complete"
         self._refresh()
 
-    def update_host_cves(self, ip: str, cve_count: int) -> None:
-        if ip in self.host_status:
-            self.host_status[ip]["cves"] = cve_count
-        self._refresh()
-
-    # ── Phase: Graph + PHANTOM ────────────────────────────────────────────
+    # ── Phase: Attack graph ──────────────────────────────────────────────
 
     def start_graph(self) -> None:
         self._task_graph = self.progress.add_task(
@@ -315,42 +291,6 @@ class ScanDisplay:
             )
         self._refresh()
 
-    def start_phantom(self) -> None:
-        self._task_phantom = self.progress.add_task(
-            "PHANTOM Kill Chain Sim",
-            total=1,
-            status="simulating...",
-        )
-        self._refresh()
-
-    def finish_phantom(self, paths: int) -> None:
-        if self._task_phantom is not None:
-            self.progress.update(
-                self._task_phantom,
-                completed=1,
-                status=f"[red]{paths} kill chains found[/]",
-            )
-        self.stats["paths"] = paths
-        self._refresh()
-
-    def start_forge(self) -> None:
-        self._task_forge = self.progress.add_task(
-            "FORGE Rule Generation",
-            total=1,
-            status="writing rules...",
-        )
-        self._refresh()
-
-    def finish_forge(self, rules: int) -> None:
-        if self._task_forge is not None:
-            self.progress.update(
-                self._task_forge,
-                completed=1,
-                status=f"[yellow]{rules} Suricata rules forged[/]",
-            )
-        self.stats["rules"] = rules
-        self._refresh()
-
     # ── Final summary ──────────────────────────────────────────────────────
 
     def print_final_summary(self) -> None:
@@ -362,9 +302,7 @@ class ScanDisplay:
             f"[bold green]✅ OBSIDIOS SCAN COMPLETE[/]\n\n"
             f"  [cyan]Hosts discovered :[/] {self.stats['hosts']}\n"
             f"  [yellow]Open ports       :[/] {self.stats['ports']}\n"
-            f"  [red]CVEs mapped      :[/] {self.stats['cves']}\n"
-            f"  [magenta]Kill chains      :[/] {self.stats['paths']}\n"
-            f"  [green]IDS rules forged :[/] {self.stats['rules']}\n\n"
+            f"  [red]CVEs mapped      :[/] {self.stats['cves']}\n\n"
             f"  [dim]Total time: {mins:02d}:{secs:02d}[/]",
             title="[bold red]OBSIDIOS[/]",
             border_style="green",

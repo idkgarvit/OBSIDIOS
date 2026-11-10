@@ -325,25 +325,6 @@ class TestRunEchoReporting:
         ) == [anomaly]
 
 
-class TestAnomalySummary:
-    def test_summary_is_shaped_for_the_dashboard(self, monkeypatch):
-        class FakeDB:
-            async def fetch_all(self, *_a, **_k):
-                return [{"anomaly_type": "NEW_PEER", "cnt": 2,
-                         "avg_conf": 0.7, "ip": "10.44.0.1"}]
-
-            async def fetch_val(self, *_a, **_k):
-                return 2
-
-        monkeypatch.setattr(dd, "db", FakeDB())
-        summary = asyncio.run(dd.get_anomaly_summary())
-        assert summary == {
-            "total": 2,
-            "by_type": [{"anomaly_type": "NEW_PEER", "cnt": 2,
-                         "avg_conf": 0.7, "ip": "10.44.0.1"}],
-        }
-
-
 def test_packet_accounting_still_works_after_hardening():
     collector = dd.PacketCollector(network="10.44.0.0/24")
     collector._process_packet(

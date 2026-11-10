@@ -149,7 +149,7 @@ async def _audit_cli(
 _scan_busy = False
 
 
-async def scan_cycle(scan_event: asyncio.Event) -> None:
+async def scan_cycle() -> None:
     global scan_counter, _scan_busy
     from forge.rule_generator import run_forge
     from iris.cve_mapper import map_cves_for_scan, persist_cves
@@ -513,7 +513,7 @@ async def _run_scan_cycle_wrapped():
     """Wrap scan_cycle with health monitoring — restarts on crash."""
     while not _shutdown.is_set():
         try:
-            await scan_cycle(asyncio.Event())
+            await scan_cycle()
         except asyncio.CancelledError:
             break
         except Exception as e:

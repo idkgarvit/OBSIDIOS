@@ -31,7 +31,7 @@ Safety model:
   • Rules are inserted at the head of the chain, so they cannot be bypassed
     by a preceding ACCEPT
   • Partial rule sets are rolled back — SHIELD never leaves orphan rules
-  • Every applied rule is removable via revert_action()/stop_shield()
+  • Every applied rule is removable via revert_action()
 """
 from __future__ import annotations
 
@@ -174,7 +174,7 @@ async def _shield_guard(target_ip: str | None, action: str) -> tuple[bool, str]:
 # iptables wrapper
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def _run_iptables(args: list[str], check: bool = True) -> tuple[bool, str]:
+async def _run_iptables(args: list[str]) -> tuple[bool, str]:
     """
     Run an iptables command asynchronously.
     Returns (success, output).
@@ -223,9 +223,9 @@ async def _iptables_rule_state(chain: str, spec: tuple[str, ...] | list[str]) ->
     ``None`` means the check itself failed (iptables missing, permission
     denied, locked xtables, timeout). Callers that remove rules must not treat
     "could not check" as "already gone": that would mark a still-live DROP rule
-    as reverted and make it unremovable by ``stop_shield()``.
+    as reverted and make it unremovable by ``revert_action()``.
     """
-    success, output = await _run_iptables(["-C", chain, *spec], check=False)
+    success, output = await _run_iptables(["-C", chain, *spec])
     if success:
         return True
     if output == "SIMULATION" or "timed out" in output:
@@ -253,7 +253,7 @@ async def _delete_rule(chain: str, spec: tuple[str, ...] | list[str], max_tries:
                 f"[SHIELD] Cannot verify whether {chain} rule was removed: {spec}"
             )
             return False
-        ok, _ = await _run_iptables(["-D", chain, *spec], check=False)
+        ok, _ = await _run_iptables(["-D", chain, *spec])
         if not ok:
             # A concurrent revert may have removed it; re-check next loop.
             continue
@@ -359,7 +359,7 @@ async def _record_action(
     """Persist an applied action, or undo the firewall change.
 
     A live iptables rule with no matching `shield_actions` row is invisible to
-    `revert_action()` and `stop_shield()` — an operator could never remove it.
+    `revert_action()` — an operator could never remove it.
     If the write fails (locked/full/corrupt DB), the rules are removed again
     and the action is reported as failed instead.
     """
@@ -1156,38 +1156,3 @@ async def close_phantom_paths() -> list[dict]:
         )
 
     return actions
-
-
-async def get_shield_summary() -> dict:
-    """Get summary of all SHIELD actions."""
-    rows = await db.fetch_all(
-        """SELECT action_type, COUNT(*) as cnt, AVG(confidence) as avg_conf
-           FROM shield_actions
-           GROUP BY action_type"""
-    )
-    active = await db.fetch_val(
-        "SELECT COUNT(*) FROM shield_actions WHERE is_active=1", default=0
-    )
-    return {
-        "total_actions": sum(r["cnt"] for r in rows),
-        "active_blocks": active,
-        "by_type": [dict(r) for r in rows],
-    }
-
-
-async def stop_shield() -> int:
-    """Revert all active firewall blocks. Returns the number reverted."""
-    active_actions = await db.fetch_all(
-        "SELECT id FROM shield_actions WHERE is_active=1 ORDER BY id DESC"
-    )
-
-    reverted = 0
-    for action in active_actions:
-        try:
-            if await revert_action(action["id"], reverted_by="COMMAND_CENTER"):
-                reverted += 1
-        except Exception as exc:
-            logger.error(f"[SHIELD] Failed to revert action #{action['id']}: {exc}")
-
-    logger.info(f"[SHIELD] Reverted {reverted}/{len(active_actions)} active blocks")
-    return reverted

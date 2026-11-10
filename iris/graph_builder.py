@@ -176,11 +176,3 @@ def get_most_exposed_entries(top_n: int = 10) -> list[dict]:
     nodes = list(_graph.nodes(data=True))
     nodes.sort(key=lambda x: _numeric(x[1].get("risk_score")), reverse=True)
     return [{"id": nid, **data} for nid, data in nodes[:top_n]]
-
-
-def apply_shield_block(src_id: int, dst_id: int) -> None:
-    """Remove edge when SHIELD blocks a path."""
-    if _graph.has_edge(src_id, dst_id):
-        _graph.remove_edge(src_id, dst_id)
-        logger.info(f"[IRIS/GRAPH] Edge {src_id}→{dst_id} removed by SHIELD")
-

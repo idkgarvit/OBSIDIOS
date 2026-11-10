@@ -1,5 +1,5 @@
 """Tests for oracle modules — posture scoring, exploit validator, Claude client."""
-from iris.exploit_validator import KNOWN_EXPLOITS, get_exploit_link
+from iris.exploit_validator import KNOWN_EXPLOITS
 from oracle.claude_client import _count_by_key, _fallback_narrative, _fallback_remediation
 from oracle.posture_score import _generate_recommendations
 
@@ -46,20 +46,7 @@ class TestGenerateRecommendations:
         assert len(recs) >= 2
 
 
-class TestGetExploitLink:
-    def test_known_exploit(self):
-        result = get_exploit_link("CVE-2017-0144")
-        assert result["title"] is not None
-        assert result["edb_id"] is not None
-
-    def test_unknown_exploit(self):
-        result = get_exploit_link("CVE-2024-99999")
-        assert result["edb_id"] is None
-        assert result["msf_module"] is None
-
-    def test_case_insensitive(self):
-        assert get_exploit_link("cve-2017-0144") == get_exploit_link("CVE-2017-0144")
-
+class TestKnownExploits:
     def test_known_exploits_fully_formed(self):
         """Every entry in KNOWN_EXPLOITS should have required fields."""
         for cve_id, info in KNOWN_EXPLOITS.items():

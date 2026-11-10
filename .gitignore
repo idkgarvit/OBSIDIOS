@@ -36,9 +36,6 @@ forge/rules/*
 .DS_Store
 Thumbs.db
 
-# Docker
-.dockerignore
-
 # IDE
 .vscode/
 .idea/
@@ -49,3 +46,8 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Packaging
+build/
+dist/
+*.egg-info/

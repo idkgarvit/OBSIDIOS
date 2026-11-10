@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import time
 from enum import StrEnum
-from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -14,18 +13,6 @@ from pydantic import BaseModel, Field, field_validator
 class Severity(StrEnum):
     CRITICAL = "CRITICAL"; HIGH = "HIGH"; MEDIUM = "MEDIUM"
     LOW = "LOW"; INFO = "INFO"; NONE = "NONE"
-
-class ExploitStatus(StrEnum):
-    THEORETICAL           = "THEORETICAL"
-    LIKELY_VULNERABLE     = "LIKELY_VULNERABLE"
-    CONFIRMED_EXPLOITABLE = "CONFIRMED_EXPLOITABLE"
-    VERIFIED              = "VERIFIED"
-    PUBLIC_EXPLOIT        = "PUBLIC_EXPLOIT"
-    MSF_AVAILABLE         = "MSF_AVAILABLE"
-
-class DiffType(StrEnum):
-    NEW_HOST="NEW_HOST"; GONE_HOST="GONE_HOST"; NEW_PORT="NEW_PORT"
-    CLOSED_PORT="CLOSED_PORT"; NEW_CVE="NEW_CVE"; SERVICE_CHANGED="SERVICE_CHANGED"
 
 class AnomalyType(StrEnum):
     TRAFFIC_SPIKE="TRAFFIC_SPIKE"; NEW_PEER="NEW_PEER"
@@ -98,23 +85,6 @@ class AttackPath(BaseModel):
     is_active: bool = True; forge_rule_ids: list[int] = Field(default_factory=list)
 
 
-
-
-class PostureScore(BaseModel):
-    recorded_at: float = Field(default_factory=time.time)
-    overall_score: float = 100.0
-    wired_score: float | None = None; wireless_score: float | None = None
-    behavioral_score: float | None = None; exploit_score: float | None = None
-    osint_score: float | None = None; active_alerts: int = 0
-    active_paths: int = 0; confirmed_vulns: int = 0
-
-    @field_validator("overall_score","wired_score","wireless_score",
-                     "behavioral_score","exploit_score","osint_score", mode="before")
-    @classmethod
-    def clamp(cls, v: Any) -> Any:
-        return max(0.0, min(100.0, float(v))) if v is not None else v
-
-
 class ForgeRule(BaseModel):
     id:              int   | None = None
     rule_sid:        int
@@ -152,22 +122,6 @@ class Anomaly(BaseModel):
     detail:            str   | None = None
     is_false_positive: bool         = False
     acknowledged:      bool         = False
-
-
-class ShieldAction(BaseModel):
-    id:            int   | None = None
-    taken_at:      float        = Field(default_factory=time.time)
-    action_type:   str
-    target_ip:     str   | None = None
-    target_port:   int   | None = None
-    rule_applied:  str   | None = None
-    trigger_type:  str   | None = None
-    trigger_id:    int   | None = None
-    confidence:    float | None = None
-    justification: str   | None = None
-    is_active:     bool         = True
-    reverted_at:   float | None = None
-    reverted_by:   str   | None = None
 
 
 class ShieldActionType(StrEnum):

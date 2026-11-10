@@ -264,10 +264,10 @@ class TestHeartbeat:
 
         monkeypatch.setattr(
             heartbeat.wired_scanner, "discover_hosts", discovery)
-        asyncio.run(heartbeat.run_heartbeat_loop("0.0.0.0/0"))
+        asyncio.run(heartbeat.heartbeat_once("0.0.0.0/0"))
         assert called == []
 
-    def _run_once(self, monkeypatch, arp_hosts, db_rows, live_ips=None):
+    def _run_once(self, monkeypatch, arp_hosts, db_rows):
         monkeypatch.setenv("OBSIDIOS_FAST_OFFLINE_GRACE_SECONDS", "60")
         fake = FakeDB(rows=db_rows)
         monkeypatch.setattr(heartbeat, "db", fake)
@@ -278,19 +278,8 @@ class TestHeartbeat:
         monkeypatch.setattr(
             heartbeat.wired_scanner, "discover_hosts", discovery)
 
-        async def scenario():
-            task = asyncio.create_task(heartbeat.run_heartbeat_loop("10.44.0.0/24"))
-            for _ in range(50):
-                if fake.executed:
-                    break
-                await asyncio.sleep(0.01)
-            await asyncio.sleep(0.05)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            return fake
-
-        return asyncio.run(scenario())
+        asyncio.run(heartbeat.heartbeat_once("10.44.0.0/24"))
+        return fake
 
     def test_freshly_seen_host_is_not_flapped_offline(self, monkeypatch):
         import time
@@ -394,20 +383,7 @@ class TestHeartbeat:
         monkeypatch.setattr(
             heartbeat.wired_scanner, "discover_hosts", discovery)
 
-        async def scenario():
-            task = asyncio.create_task(
-                heartbeat.run_heartbeat_loop("10.44.0.0/24", socketio=socketio)
-            )
-            for _ in range(50):
-                if fake.executed:
-                    break
-                await asyncio.sleep(0.01)
-            await asyncio.sleep(0.05)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-        asyncio.run(scenario())
+        asyncio.run(heartbeat.heartbeat_once("10.44.0.0/24", socketio=socketio))
         assert any("INSERT INTO hosts" in sql for sql, _ in fake.executed)
         assert any("UPDATE hosts SET is_active=1, last_seen=?" in sql
                    for sql, _ in fake.executed)

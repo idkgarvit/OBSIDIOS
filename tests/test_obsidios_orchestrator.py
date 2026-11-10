@@ -91,7 +91,7 @@ def test_a_dead_webhook_does_not_skip_the_scan(monkeypatch):
     monkeypatch.setattr(settings.scan, "scan_interval_seconds", 0)
 
     obsidios._shutdown.clear()
-    asyncio.run(obsidios.scan_cycle(asyncio.Event()))
+    asyncio.run(obsidios.scan_cycle())
 
     assert scans == [True]
     assert any("scan_phase" in sql for sql, _ in fake_db.executed)
@@ -449,7 +449,7 @@ def test_scan_cycle_does_not_claim_success_for_a_refused_scan(monkeypatch):
     monkeypatch.setattr(settings.scan, "scan_interval_seconds", 0)
 
     obsidios._shutdown.clear()
-    asyncio.run(obsidios.scan_cycle(asyncio.Event()))
+    asyncio.run(obsidios.scan_cycle())
 
     assert any(
         level == "warning" and "incomplete" in message.lower()
@@ -557,7 +557,7 @@ def test_auto_prune_ages_scans_that_never_finished(monkeypatch):
     monkeypatch.setattr(settings.scan, "scan_interval_seconds", 0)
 
     obsidios._shutdown.clear()
-    asyncio.run(obsidios.scan_cycle(asyncio.Event()))
+    asyncio.run(obsidios.scan_cycle())
 
     remaining = [r["id"] for r in conn.execute("SELECT id FROM scans ORDER BY id")]
     assert remaining == [5]

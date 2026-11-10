@@ -486,7 +486,7 @@ def test_env_template_exists_and_has_no_secrets():
     assert "DASHBOARD_PASS=" in text
     for line in text.splitlines():
         for key in ("NVIDIA_API_KEY=", "ANTHROPIC_API_KEY=", "OPENROUTER_API_KEY=",
-                    "OBSIDIOS_SECRET=", "MSF_PASSWORD=", "SHODAN_API_KEY="):
+                    "OBSIDIOS_SECRET=", "SHODAN_API_KEY="):
             if line.startswith(key):
                 value = line.split("=", 1)[1].split(" #", 1)[0].strip()
                 assert value == "", line

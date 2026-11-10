@@ -816,7 +816,7 @@ class TestUntrackedRuleRollback:
     """An applied rule that cannot be recorded must not stay in the firewall.
 
     Every guard and revert path keys off the `shield_actions` row. A rule with
-    no row is an operator-invisible block that survives `stop_shield()`.
+    no row is an operator-invisible block that survives `revert_action()`.
     """
 
     @staticmethod

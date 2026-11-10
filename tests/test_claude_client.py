@@ -785,24 +785,6 @@ class TestScanAge:
             claude_client, "db", self.FakeDB({"finished_at": _time.time() + 3600}))
         assert asyncio.run(claude_client._scan_age()) == 0.0
 
-    def test_has_recent_scan_uses_the_window(self, monkeypatch):
-        async def young():
-            return 60.0
-
-        async def old():
-            return 10 * 24 * 3600.0
-
-        monkeypatch.setattr(claude_client, "_scan_age", young)
-        assert asyncio.run(claude_client._has_recent_scan()) is True
-        monkeypatch.setattr(claude_client, "_scan_age", old)
-        assert asyncio.run(claude_client._has_recent_scan()) is False
-        monkeypatch.setattr(claude_client, "_scan_age", lambda: _none())
-        assert asyncio.run(claude_client._has_recent_scan()) is False
-
-
-async def _none():
-    return None
-
 
 class TestClientSelection:
     """`_get_client` must route to the provider whose key is configured."""

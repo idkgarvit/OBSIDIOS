@@ -180,35 +180,6 @@ class TestCidrGuessing:
         assert nd._clamp_cidr("10.20.0.0/16", "10.20.30.40") == "10.20.0.0/16"
         assert nd._clamp_cidr("10.20.30.0/24", "10.20.30.40") == "10.20.30.0/24"
 
-    @pytest.mark.parametrize("cidr,expected", [
-        ("10.0.0.0/24", True), ("10.0.0.0/33", False), ("nope", False), ("", False),
-    ])
-    def test_validate_cidr(self, cidr, expected):
-        assert nd.validate_cidr(cidr) is expected
-
-
-class TestInterfaceListing:
-    def test_veth_suffix_is_stripped_and_loopback_skipped(self, monkeypatch):
-        monkeypatch.setattr(
-            nd.subprocess, "run",
-            lambda *a, **k: _completed(
-                "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536\n"
-                "2: eth0@if42: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500\n"
-                "3: wlan0: <BROADCAST,MULTICAST> mtu 1500\n"
-            ),
-        )
-        ip_map = {"eth0": "10.0.0.5", "wlan0": None}
-        monkeypatch.setattr(nd, "get_local_ip", lambda name: ip_map[name])
-        interfaces = nd.list_interfaces()
-        assert interfaces == [
-            {"name": "eth0", "ip": "10.0.0.5", "status": "up"},
-            {"name": "wlan0", "ip": None, "status": "down"},
-        ]
-
-    def test_command_failure_returns_empty(self, monkeypatch):
-        monkeypatch.setattr(nd.subprocess, "run", lambda *a, **k: _completed(""))
-        assert nd.list_interfaces() == []
-
 
 class TestDetectNetwork:
     def test_missing_local_ip_is_reported(self, monkeypatch):

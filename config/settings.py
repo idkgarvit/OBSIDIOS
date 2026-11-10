@@ -119,9 +119,7 @@ class ScanSettings(BaseSettings):
             args = args.replace("ZOMBIE", self.zombie_host)
         return args
 
-    nmap_top_ports:    int   = Field(1000,             validation_alias="OBSIDIOS_NMAP_TOP_PORTS")
     scan_concurrency:  int   = Field(20,               validation_alias="OBSIDIOS_SCAN_CONCURRENCY")
-    arp_timeout:       float = Field(2.0,              validation_alias="OBSIDIOS_ARP_TIMEOUT")
     zombie_host:       str   = Field("",               validation_alias="OBSIDIOS_ZOMBIE_HOST")
     nvd_api_key:       str   = Field("",               validation_alias="NVD_API_KEY")
     wireless_interface: str = Field("wlan0",         validation_alias="OBSIDIOS_WLAN_IFACE")
@@ -130,10 +128,7 @@ class ScanSettings(BaseSettings):
 
 
 class DatabaseSettings(BaseSettings):
-    db_path:              Path = DB_PATH
-    cache_size_kb:        int  = Field(65536,     validation_alias="OBSIDIOS_DB_CACHE_KB")
-    mmap_size_bytes:      int  = Field(268435456, validation_alias="OBSIDIOS_MMAP")
-    wal_autocheckpoint:   int  = Field(1000,      validation_alias="OBSIDIOS_WAL_CHECKPOINT")
+    db_path: Path = DB_PATH
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
@@ -146,7 +141,6 @@ class AISettings(BaseSettings):
     openai_base_url:   str = Field("https://openrouter.ai/api/v1", validation_alias="OPENAI_BASE_URL")
     openai_model:      str = Field("liquid/lfm-2.5-1.2b-instruct:free", validation_alias="OPENAI_MODEL")
     model:             str = Field("claude-opus-4-5", validation_alias="OBSIDIOS_AI_MODEL")
-    max_tokens:        int = Field(4096, validation_alias="OBSIDIOS_AI_MAX_TOKENS")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @model_validator(mode="after")
@@ -170,24 +164,14 @@ class AlertSettings(BaseSettings):
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
-class MetasploitSettings(BaseSettings):
-    host:     str  = Field("127.0.0.1", validation_alias="MSF_HOST")
-    port:     int  = Field(55553,       validation_alias="MSF_PORT")
-    password: str  = Field("",           validation_alias="MSF_PASSWORD")
-    ssl:      bool = Field(False,       validation_alias="MSF_SSL")
-    model_config = {"env_file": ".env", "extra": "ignore"}
-
-
 class OSINTSettings(BaseSettings):
     shodan_api_key: str = Field("", validation_alias="SHODAN_API_KEY")
-    hibp_api_key:   str = Field("", validation_alias="HIBP_API_KEY")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 
 class DashboardSettings(BaseSettings):
     host:       str  = Field("127.0.0.1", validation_alias="OBSIDIOS_DASH_HOST")
     port:       int  = Field(8080,        validation_alias="OBSIDIOS_DASH_PORT")
-    debug:      bool = Field(False,       validation_alias="OBSIDIOS_DASH_DEBUG")
     secret_key: str  = Field("",          validation_alias="OBSIDIOS_SECRET")
     model_config = {"env_file": ".env", "extra": "ignore"}
 
@@ -195,11 +179,9 @@ class DashboardSettings(BaseSettings):
 class SecuritySettings(BaseSettings):
     """Company-infra hardening knobs. Safe defaults: fail closed."""
     env: str = Field("dev", validation_alias="OBSIDIOS_ENV")  # dev | production
-    allow_public_scan: bool = Field(False, validation_alias="OBSIDIOS_ALLOW_PUBLIC_SCAN")
-    cors_origins: str = Field("http://localhost:8080", validation_alias="CORS_ORIGINS")
-    dashboard_user: str = Field("admin", validation_alias="DASHBOARD_USER")
-    # DASHBOARD_PASS is read via os.environ in dashboard/app.py to avoid logging;
-    # kept here only for prod validation (presence check).
+    # The remaining operator knobs are read straight from os.environ where
+    # they are used (dashboard credentials/CORS, SHIELD allowlist/scan guard)
+    # so a runtime override wins over the value captured at import time.
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property
@@ -383,7 +365,6 @@ scan      = ScanSettings()
 db        = DatabaseSettings()
 ai        = AISettings()
 alerts    = AlertSettings()
-msf       = MetasploitSettings()
 osint     = OSINTSettings()
 dash      = DashboardSettings()
 security  = SecuritySettings()

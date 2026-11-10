@@ -158,68 +158,12 @@ class TestRunScan:
         assert fake_db.executed == []
 
 
-class TestFastPulse:
-    def test_unsafe_database_target_is_refused(self, monkeypatch):
-        async def unsafe_target(*_a, **_k):
-            return "0.0.0.0/0"
-
-        monkeypatch.setattr(db, "fetch_val", unsafe_target)
-        called = []
-
-        async def fake_discovery(_target):
-            called.append(_target)
-            return []
-
-        monkeypatch.setattr(wired, "discover_hosts", fake_discovery)
-        asyncio.run(wired.fast_host_discovery())
-        assert called == []
-
+class TestFastGrace:
     def test_grace_parser_handles_garbage_and_negative_values(self, monkeypatch):
         monkeypatch.setenv("OBSIDIOS_FAST_OFFLINE_GRACE_SECONDS", "not-a-number")
         assert wired._fast_offline_grace_seconds() == 120
         monkeypatch.setenv("OBSIDIOS_FAST_OFFLINE_GRACE_SECONDS", "-5")
         assert wired._fast_offline_grace_seconds() == 0
-
-    def test_malformed_discovery_records_are_skipped(self, monkeypatch):
-        import json as _json
-
-        async def target(*_a, **_k):
-            return "10.44.0.0/24"
-
-        async def discovery(_target):
-            return [
-                "junk",
-                None,
-                {"mac": "aa:bb:cc:dd:ee:ff"},   # no ip
-                {"ip": None},
-                {"ip": "   "},
-                {"ip": "10.44.0.9", "mac": "aa:bb:cc:dd:ee:ff"},
-            ]
-
-        executed = []
-
-        async def no_rows(*_a, **_k):
-            return []
-
-        async def record(sql, params=()):
-            executed.append((sql, params))
-
-        monkeypatch.setattr(db, "fetch_val", target)
-        monkeypatch.setattr(db, "fetch_all", no_rows)
-        monkeypatch.setattr(db, "execute", record)
-        monkeypatch.setattr(wired, "discover_hosts", discovery)
-
-        asyncio.run(wired.fast_host_discovery())
-
-        live = [params for sql, params in executed
-                if sql.startswith("UPDATE hosts SET is_active=1")]
-        assert live, "valid discovery results must still be persisted"
-        active_json = next(
-            value for params in live for value in params
-            if isinstance(value, str) and value.startswith("["))
-        assert _json.loads(active_json) == ["10.44.0.9"]
-        inserts = [p for sql, p in executed if sql.startswith("INSERT INTO hosts")]
-        assert inserts and inserts[0][0] == "10.44.0.9"
 
 
 class TestDatabaseWrites:

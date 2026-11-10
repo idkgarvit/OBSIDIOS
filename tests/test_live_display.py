@@ -47,10 +47,9 @@ class TestLayout:
         display = live_display.ScanDisplay("10.0.0.0/24")
         display.finish_arp(["10.0.0.5"])
         display.finish_cve(7)
-        display.finish_phantom(2)
-        display.finish_forge(9)
         out = _render(display)
-        assert "7" in out and "2" in out and "9" in out
+        assert "HOSTS" in out and "CVEs" in out
+        assert display.stats == {"hosts": 1, "ports": 0, "cves": 7}
 
 
 class TestPhaseMethods:
@@ -62,10 +61,7 @@ class TestPhaseMethods:
         display.host_scanning("10.0.0.5")   # unknown host must not KeyError
         display.host_done("10.0.0.5", 0, None)
         display.finish_cve(0)               # no task started yet
-        display.update_host_cves("10.0.0.5", 1)
         display.finish_graph(1, 0)          # no task started yet
-        display.finish_phantom(0)
-        display.finish_forge(0)
 
     def test_finish_cve_uses_the_task_total(self):
         display = live_display.ScanDisplay("10.0.0.0/24")
@@ -98,11 +94,11 @@ class TestContextManager:
             live_display, "console", Console(file=buf, width=120, force_terminal=False)
         )
         display = live_display.ScanDisplay("10.0.0.0/24")
-        display.stats.update(hosts=3, ports=11, cves=4, paths=2, rules=7)
+        display.stats.update(hosts=3, ports=11, cves=4)
         display.print_final_summary()
         out = buf.getvalue()
         assert "Hosts discovered" in out and "3" in out
-        assert "IDS rules forged" in out and "7" in out
+        assert "CVEs mapped" in out and "4" in out
 
 
 class TestPipelineWiring:

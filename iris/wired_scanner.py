@@ -921,22 +921,3 @@ async def compute_scan_diff(cur_id: int, prev_id: int | None = None) -> list[dic
     if rows: 
         await db.executemany("INSERT INTO scan_diffs (scan_id, diff_type, host_id, port_id, cve_id, detail, mitre_technique, mitre_tactic, severity) VALUES (?,?,?,?,?,?,?,?,?)", rows)
     return diffs
-
-
-async def fast_host_discovery():
-    """Run one fast discovery pulse against the configured target.
-
-    The reconciliation lives in ``iris.heartbeat.heartbeat_once`` so the daemon
-    has exactly one presence path: the same code that publishes SocketIO
-    events also writes the hosts table, and a zero-result sweep never
-    mass-offlines the network.
-    """
-    from chronicle.db import fetch_val
-    from iris.heartbeat import heartbeat_once
-
-    target = await fetch_val(
-        "SELECT value FROM system_settings WHERE key='target_network'",
-        default="")
-    if not target:
-        return
-    await heartbeat_once(target)
