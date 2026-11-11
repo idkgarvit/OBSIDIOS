@@ -151,6 +151,52 @@ def _clean_text(value, limit: int = 128) -> str:
     return value.strip()[:limit]
 
 
+# Nmap ships the full IEEE OUI list; the built-in table only names a few
+# dozen vendors. Read Nmap's copy instead of vendoring ~30k rows.
+_NMAP_PREFIX_FILES = (
+    "/usr/share/nmap/nmap-mac-prefixes",
+    "/usr/local/share/nmap/nmap-mac-prefixes",
+    "/opt/homebrew/share/nmap/nmap-mac-prefixes",
+)
+_nmap_prefixes: dict[str, str] | None = None
+
+
+def _load_nmap_prefixes() -> dict[str, str]:
+    """Load Nmap's OUI table once; an absent file simply yields no entries."""
+    global _nmap_prefixes
+    if _nmap_prefixes is not None:
+        return _nmap_prefixes
+    table: dict[str, str] = {}
+    for path in _NMAP_PREFIX_FILES:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split(None, 1)
+                    if len(parts) != 2:
+                        continue
+                    prefix = re.sub(r"[^0-9A-Fa-f]", "", parts[0]).upper()
+                    vendor = parts[1].strip()[:128]
+                    if len(prefix) >= 6 and vendor:
+                        table[prefix[:6]] = vendor
+        except OSError:
+            continue
+        if table:
+            break
+    _nmap_prefixes = table
+    return table
+
+
+def _nmap_oui_vendor(mac: str) -> str | None:
+    """Vendor from Nmap's prefix list, for OUIs the local table misses."""
+    hex_only = re.sub(r"[^0-9A-F]", "", (mac or "").upper())
+    if len(hex_only) < 6:
+        return None
+    return _load_nmap_prefixes().get(hex_only[:6])
+
+
 def _clean_hostname(name, ip: str | None = None) -> str | None:
     """Normalise a PTR/NSS name, dropping IPs, local domains and placeholders."""
     if not isinstance(name, str):
@@ -194,7 +240,8 @@ def lookup_mac_vendor(mac: str) -> str | None:
         return None
     if first & 0x01 or first & 0x02:
         return None
-    return _lookup_mac_vendor(raw)
+    vendor = _lookup_mac_vendor(raw)
+    return vendor or _nmap_oui_vendor(raw)
 
 
 def resolve_vendor(mac: str | None, nmap_vendor: str | None = None) -> str | None:

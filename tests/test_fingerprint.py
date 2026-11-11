@@ -119,6 +119,33 @@ class TestVendorAndOsFallback:
             ip="192.168.1.44", os_name="Cisco IOS 15.2") == fp.ROUTER
 
 
+class TestNmapOuiTable:
+    def test_unknown_oui_falls_back_to_nmaps_prefix_list(
+            self, monkeypatch, tmp_path):
+        prefixes = tmp_path / "nmap-mac-prefixes"
+        prefixes.write_text(
+            "# OUI table\nA45046\tRealme\n00:1A:2B  Example Corp\n")
+        monkeypatch.setattr(fp, "_nmap_prefixes", None)
+        monkeypatch.setattr(fp, "_NMAP_PREFIX_FILES", (str(prefixes),))
+
+        assert fp.lookup_mac_vendor("A4:50:46:11:22:33") == "Realme"
+        assert fp._nmap_oui_vendor("00:1a:2b:11:22:33") == "Example Corp"
+
+    def test_built_in_table_wins_over_nmap(self, monkeypatch):
+        monkeypatch.setattr(fp, "_nmap_prefixes", {"143375": "Wrong Vendor"})
+        assert fp.lookup_mac_vendor("14:33:75:aa:bb:cc") == "Zyxel"
+
+    def test_randomised_mac_never_consults_the_nmap_table(self, monkeypatch):
+        monkeypatch.setattr(fp, "_nmap_prefixes", {"B6884E": "Some Vendor"})
+        assert fp.lookup_mac_vendor("B6:88:4E:DD:A1:A4") is None
+
+    def test_missing_prefix_file_is_not_fatal(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(fp, "_nmap_prefixes", None)
+        monkeypatch.setattr(
+            fp, "_NMAP_PREFIX_FILES", (str(tmp_path / "absent"),))
+        assert fp._load_nmap_prefixes() == {}
+
+
 class TestHostnameCleaning:
     def test_local_suffix_is_removed(self):
         assert fp._clean_hostname("printer.lan") == "printer"

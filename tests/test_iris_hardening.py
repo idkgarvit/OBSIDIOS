@@ -8,6 +8,8 @@ import subprocess
 import time
 import uuid
 
+import pytest
+
 from chronicle import db
 from dashboard.app import run_async
 from iris import wired_scanner as wired
@@ -52,6 +54,11 @@ class FakeScanner:
 
 
 class TestDiscovery:
+    @pytest.fixture(autouse=True)
+    def _no_real_neighbour_probe(self, monkeypatch):
+        """Discovery tests must not read the host ARP cache or sleep on it."""
+        monkeypatch.setattr(wired, "_neighbour_macs", lambda _ips: {})
+
     def test_unsafe_target_is_refused_before_any_sweep(self, monkeypatch):
         called = []
 
@@ -188,6 +195,158 @@ class TestDiscovery:
 
         hosts = asyncio.run(wired.discover_hosts("10.44.0.0/24"))
         assert hosts == [{"ip": "10.44.0.9", "mac": "AA:BB:CC:DD:EE:01"}]
+
+
+class TestArpScanFallback:
+    """Raw sockets may be granted narrowly instead of running as root."""
+
+    def test_scapy_permission_error_falls_back_to_arp_scan(self, monkeypatch):
+        def no_root(*_a, **_k):
+            raise PermissionError("raw socket permission denied")
+
+        monkeypatch.setattr(wired, "srp", no_root)
+        monkeypatch.setattr(
+            wired, "_arp_scan_cli",
+            lambda _net, _iface: [
+                {"ip": "10.44.0.2", "mac": "A4:50:46:11:22:33"}])
+
+        assert wired._arp_sweep("10.44.0.0/24", 2.0) == [
+            {"ip": "10.44.0.2", "mac": "A4:50:46:11:22:33"}]
+
+    def test_plain_output_is_parsed_and_junk_dropped(self):
+        stdout = (
+            "10.44.0.2\tA4:50:46:11:22:33\tRealme\n"
+            "10.44.0.3 EC:FA:BC:44:55:66 Samsung\n"
+            "not a host line\n"
+            "10.44.0.4\t00:00:00:00:00:00\t?\n"
+        )
+        assert wired._parse_arp_scan(stdout) == [
+            {"ip": "10.44.0.2", "mac": "A4:50:46:11:22:33"},
+            {"ip": "10.44.0.3", "mac": "EC:FA:BC:44:55:66"},
+        ]
+
+    def test_direct_binary_then_narrow_noninteractive_sudo(
+            self, monkeypatch, tmp_path):
+        binary = tmp_path / "arp-scan"
+        binary.write_text("")
+        calls = []
+
+        class Result:
+            def __init__(self, rc, out=""):
+                self.returncode, self.stdout = rc, out
+
+        def fake_run(argv, **_kwargs):
+            calls.append(argv)
+            if argv[0] == "sudo":
+                return Result(0, "10.44.0.2\tA4:50:46:11:22:33\tX\n")
+            return Result(1)  # no CAP_NET_RAW on the binary
+
+        monkeypatch.setattr(wired, "_ARP_SCAN_PATHS", (str(binary),))
+        monkeypatch.setattr(wired.os, "geteuid", lambda: 1000)
+        monkeypatch.setattr(wired.subprocess, "run", fake_run)
+
+        hosts = wired._arp_scan_cli("10.44.0.0/24", "wlan0")
+
+        assert hosts == [{"ip": "10.44.0.2", "mac": "A4:50:46:11:22:33"}]
+        assert calls[0][0] == str(binary)
+        assert calls[1][:3] == ["sudo", "-n", str(binary)]
+        assert "--interface=wlan0" in calls[1]
+        assert calls[1][-2:] == ["--", "10.44.0.0/24"]
+
+    def test_missing_binary_is_not_an_error(self, monkeypatch):
+        monkeypatch.setattr(wired, "_ARP_SCAN_PATHS", ())
+        monkeypatch.setattr(wired.shutil, "which", lambda _name: None)
+        assert wired._arp_scan_cli("10.44.0.0/24", None) == []
+
+
+class TestLocalInterfaceMac:
+    def test_local_address_reports_its_own_nic(self, monkeypatch):
+        interfaces = ["lo", "wlan0"]
+        addresses = {
+            "lo": {wired.netifaces.AF_INET: [{"addr": "127.0.0.1"}],
+                   wired.netifaces.AF_LINK: [{"addr": "00:00:00:00:00:00"}]},
+            "wlan0": {wired.netifaces.AF_INET: [{"addr": "10.44.0.7"}],
+                      wired.netifaces.AF_LINK: [{"addr": "a4:50:46:11:22:33"}]},
+        }
+        monkeypatch.setattr(wired.netifaces, "interfaces", lambda: interfaces)
+        monkeypatch.setattr(wired.netifaces, "ifaddresses",
+                            lambda iface: addresses[iface])
+
+        assert wired._local_mac("10.44.0.7") == "A4:50:46:11:22:33"
+        assert wired._local_mac("10.44.0.8") is None
+
+    def test_netifaces_failure_is_not_fatal(self, monkeypatch):
+        def boom():
+            raise OSError("no interfaces")
+
+        monkeypatch.setattr(wired.netifaces, "interfaces", boom)
+        assert wired._local_mac("10.44.0.7") is None
+
+
+class TestNeighbourFallback:
+    """MAC identity must work without CAP_NET_RAW."""
+
+    def test_ip_neigh_output_is_parsed_and_placeholders_dropped(self, monkeypatch):
+        class Result:
+            returncode = 0
+            stdout = (
+                "10.44.0.2 dev eth0 lladdr a4:50:46:11:22:33 REACHABLE\n"
+                "10.44.0.3 dev eth0  FAILED\n"
+                "10.44.0.4 dev eth0 lladdr 00:00:00:00:00:00 STALE\n"
+                "10.44.0.5 dev eth0 lladdr EC:FA:BC:44:55:66 STALE\n"
+            )
+
+        monkeypatch.setattr(
+            wired.subprocess, "run", lambda *_a, **_k: Result())
+
+        assert wired._read_neighbour_table() == {
+            "10.44.0.2": "A4:50:46:11:22:33",
+            "10.44.0.5": "EC:FA:BC:44:55:66",
+        }
+
+    def test_missing_iproute2_falls_back_to_proc_arp(self, monkeypatch, tmp_path):
+        arp = tmp_path / "arp"
+        arp.write_text(
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+            "10.44.0.6        0x1         0x2         A4:50:46:77:88:99     *        eth0\n")
+
+        def no_ip(*_a, **_k):
+            raise FileNotFoundError("ip")
+
+        monkeypatch.setattr(wired.subprocess, "run", no_ip)
+        real_open = open
+        monkeypatch.setattr(
+            "builtins.open",
+            lambda path, *a, **k: real_open(arp if path == "/proc/net/arp" else path, *a, **k))
+
+        assert wired._read_neighbour_table() == {
+            "10.44.0.6": "A4:50:46:77:88:99"}
+
+    def test_priming_tolerates_a_socket_that_cannot_be_opened(self, monkeypatch):
+        def no_socket(*_a, **_k):
+            raise OSError("network unreachable")
+
+        monkeypatch.setattr(wired.socket, "socket", no_socket)
+        wired._prime_neighbours(["10.44.0.2"], wait=0)  # must not raise
+
+    def test_discovery_uses_the_cache_when_raw_sockets_fail(self, monkeypatch):
+        def no_root(*_args):
+            raise PermissionError("raw socket permission denied")
+
+        async def no_resolution(_ips, **_kwargs):
+            return {}
+
+        monkeypatch.setattr(wired, "_arp_sweep", no_root)
+        monkeypatch.setattr(wired.nmap, "PortScanner", FakeScanner)
+        monkeypatch.setattr(wired, "resolve_hostnames", no_resolution)
+        monkeypatch.setattr(
+            wired, "_neighbour_macs",
+            lambda ips: {"10.44.0.7": "A4:50:46:AA:BB:CC"}
+            if ips == ["10.44.0.7"] else {})
+
+        hosts = asyncio.run(wired.discover_hosts("10.44.0.0/24"))
+        assert hosts == [
+            {"ip": "10.44.0.7", "mac": "A4:50:46:AA:BB:CC"}]
 
 
 class TestRunScan:

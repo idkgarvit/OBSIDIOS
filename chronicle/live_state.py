@@ -158,7 +158,9 @@ async def retire_stale_attack_paths(active_ips: set[str] | None = None) -> int:
     try:
         placeholders = ",".join("?" for _ in stale)
         await db.execute(
-            f"UPDATE attack_paths SET is_active=0 WHERE id IN ({placeholders})",
+            # placeholders are generated only from integer row ids above and
+            # every value is bound, never interpolated.
+            f"UPDATE attack_paths SET is_active=0 WHERE id IN ({placeholders})",  # nosec B608
             tuple(stale),
         )
     except Exception as exc:
@@ -170,8 +172,9 @@ async def retire_stale_attack_paths(active_ips: set[str] | None = None) -> int:
     try:
         placeholders = ",".join("?" for _ in stale)
         await db.execute(
+            # same integer-only placeholder list, bound below.
             f"UPDATE forge_rules SET is_active=0 WHERE is_active=1 "
-            f"AND attack_path_id IN ({placeholders})",
+            f"AND attack_path_id IN ({placeholders})",  # nosec B608
             tuple(stale),
         )
     except Exception as exc:

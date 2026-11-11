@@ -77,6 +77,27 @@ The current build contains:
 - A network interface in the target subnet (for ARP scanning)
 - Python 3.13, `nmap`, and Pango/Cairo libraries if you run the CLI or dashboard outside Docker
 
+> **Precise ARP without running as root.** Docker already grants `NET_RAW` to
+> the daemon. On bare metal, IRIS tries Scapy first, then `arp-scan` (direct,
+> then `sudo -n`), then the kernel neighbour cache. For the active sweep
+> without making the scanner root, grant the capability to that one binary:
+>
+> ```bash
+> sudo apt install arp-scan
+> sudo setcap cap_net_raw+ep /usr/sbin/arp-scan
+> ```
+>
+> Or allow only that command non-interactively:
+>
+> ```bash
+> echo "$USER ALL=(root) NOPASSWD: /usr/sbin/arp-scan" | sudo tee /etc/sudoers.d/obsidios-arp
+> sudo chmod 440 /etc/sudoers.d/obsidios-arp
+> ```
+>
+> `sudo -n` never prompts, so an unconfigured host simply falls back. Do not
+> give passwordless sudo to `python` or set capabilities on the interpreter —
+> either applies to every script it runs, not just the ARP probe.
+
 ### 1. Clone & Configure
 
 ```bash
@@ -440,7 +461,7 @@ Configurable retention of **1–3650 days** (default 30). Auto-prune runs at sca
 | Host has no wireless hardware | Expected for desktops/VMs | OBSIDIOS handles it gracefully and reports no wireless threats |
 | `OBSIDIOS_SECRET` warning | No secret key configured | Set `OBSIDIOS_SECRET` to 32+ random characters in production |
 
-- OBSIDIOS requires **NET_RAW/NET_ADMIN capabilities** (not `--privileged`) for ARP scanning and iptables; the reference compose file drops all other capabilities
+- OBSIDIOS requires **NET_RAW/NET_ADMIN capabilities** (not `--privileged`) for ARP scanning and iptables; the reference compose file drops all other capabilities. On bare metal, prefer `setcap cap_net_raw+ep /usr/sbin/arp-scan` over running the scanner as root.
 - Always deploy in an isolated network segment
 - Change the default dashboard credentials (`admin` / `obsidios123`) in production
 - Set `OBSIDIOS_SECRET` to a strong random value in production

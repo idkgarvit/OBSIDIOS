@@ -11,6 +11,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import socket
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -106,8 +108,168 @@ def _arp_sweep(network: str, timeout: float) -> list[dict[str, str]]:
     iface = _get_iface_for_network(network)
     pkt = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(pdst=network)
     target_iface = iface or scapy_conf.iface
-    answered, _ = srp(pkt, iface=target_iface, timeout=timeout, retry=2, verbose=False)
-    return [{"ip": r.psrc, "mac": r.hwsrc.upper()} for _, r in answered]
+    try:
+        answered, _ = srp(pkt, iface=target_iface, timeout=timeout, retry=2, verbose=False)
+        return [{"ip": r.psrc, "mac": r.hwsrc.upper()} for _, r in answered]
+    except Exception as exc:
+        # Scapy needs CAP_NET_RAW. Rather than run the whole scanner as root,
+        # fall back to arp-scan, which can be given that one capability (or a
+        # single NOPASSWD sudoers rule) without widening the app's privileges.
+        logger.info(f"[IRIS] Scapy ARP unavailable ({exc}); trying arp-scan")
+        return _arp_scan_cli(network, iface)
+
+
+_ARP_SCAN_PATHS = (
+    "/usr/sbin/arp-scan",
+    "/usr/local/sbin/arp-scan",
+    "/usr/bin/arp-scan",
+    "/usr/local/bin/arp-scan",
+)
+
+
+def _parse_arp_scan(stdout: str) -> list[dict[str, str]]:
+    """Parse ``arp-scan --plain`` output (tabs, sometimes spaces)."""
+    hosts: list[dict[str, str]] = []
+    for line in (stdout or "").splitlines():
+        cols = line.split("\t") if "\t" in line else line.split()
+        if len(cols) < 2:
+            continue
+        ip, mac = cols[0].strip(), cols[1].strip()
+        if (_MAC_RE.fullmatch(mac)
+                and mac.upper() != "00:00:00:00:00:00"
+                and re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", ip)):
+            hosts.append({"ip": ip, "mac": mac.upper()})
+    return hosts
+
+
+def _arp_scan_cli(network: str, iface: str | None) -> list[dict[str, str]]:
+    """ARP via ``arp-scan`` when Scapy cannot open a raw socket.
+
+    Tried directly first, because file capabilities on the binary are enough.
+    Then via ``sudo -n`` so a narrow NOPASSWD rule works too. ``-n`` is
+    deliberate: an unattended scanner must never block on a password prompt,
+    and an unconfigured sudo simply fails and leaves the caller to the
+    neighbour-cache fallback.
+    """
+    binary = next((p for p in _ARP_SCAN_PATHS if os.path.isfile(p)), None)
+    if binary is None:
+        binary = shutil.which("arp-scan")
+    if not binary:
+        return []
+    argv = [binary, "--plain", "--quiet", "--retry=2", "--timeout=200",
+            "--", network]
+    if iface:
+        argv.insert(-2, f"--interface={iface}")
+    attempts = [argv]
+    if os.geteuid() != 0:
+        attempts.append(["sudo", "-n", *argv])
+    for attempt in attempts:
+        try:
+            result = subprocess.run(
+                attempt, capture_output=True, text=True, timeout=30,
+                check=False)
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode == 0:
+            return _parse_arp_scan(result.stdout)
+    return []
+
+
+_MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
+
+
+def _read_neighbour_table() -> dict[str, str]:
+    """Return IP → MAC from the kernel ARP cache.
+
+    Reading the cache needs no privileges; only sending raw ARP frames does.
+    ``ip neigh`` is preferred because it exposes entry state, and
+    ``/proc/net/arp`` covers images without iproute2.
+    """
+    table: dict[str, str] = {}
+    try:
+        result = subprocess.run(
+            ["ip", "-4", "neigh", "show"],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        result = None
+    if result is not None and result.returncode == 0:
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            mac = next((p for p in parts if _MAC_RE.fullmatch(p)), None)
+            # A FAILED/INCOMPLETE entry is a resolution in progress, not an
+            # identity; an all-zero address is the kernel's placeholder.
+            if (mac and mac.upper() != "00:00:00:00:00:00"
+                    and not any(s in parts for s in ("FAILED", "INCOMPLETE"))):
+                table[parts[0]] = mac.upper()
+    if table:
+        return table
+    try:
+        with open("/proc/net/arp", encoding="ascii", errors="replace") as fh:
+            next(fh, None)  # header
+            for line in fh:
+                cols = line.split()
+                if len(cols) < 4:
+                    continue
+                mac = cols[3]
+                if (_MAC_RE.fullmatch(mac)
+                        and mac.upper() != "00:00:00:00:00:00"):
+                    table[cols[0]] = mac.upper()
+    except OSError:
+        pass
+    return table
+
+
+def _prime_neighbours(ips: list[str], wait: float = 0.8) -> None:
+    """Make the kernel resolve ARP for these addresses.
+
+    Sending an ordinary UDP datagram to a same-subnet address makes the kernel
+    broadcast an ARP request; the socket is unprivileged. The neighbour table
+    is read afterwards, which recovers MAC/vendor identity when Scapy cannot
+    open a raw socket.
+    """
+    sock = None
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setblocking(False)
+        for ip in ips:
+            try:
+                sock.sendto(b"\x00", (ip, 9))
+            except OSError:
+                continue
+        # Keep the socket open while the kernel finishes resolution.
+        time.sleep(wait)
+    except OSError as exc:
+        logger.debug(f"[IRIS] Neighbour priming unavailable: {exc}")
+    finally:
+        if sock is not None:
+            sock.close()
+
+
+def _neighbour_macs(ips: list[str]) -> dict[str, str]:
+    """Prime the ARP cache for ``ips`` and return whatever it resolved."""
+    _prime_neighbours(ips)
+    return _read_neighbour_table()
+
+
+def _local_mac(ip: str) -> str | None:
+    """MAC of a local interface; ARP never contains the scanner's own address."""
+    try:
+        for iface in netifaces.interfaces():
+            addrs = netifaces.ifaddresses(iface)
+            if not any(a.get("addr") == ip
+                       for a in addrs.get(netifaces.AF_INET, [])):
+                continue
+            for link in addrs.get(netifaces.AF_LINK, []):
+                mac = link.get("addr")
+                if (isinstance(mac, str) and _MAC_RE.fullmatch(mac)
+                        and mac.upper() != "00:00:00:00:00:00"):
+                    return mac.upper()
+    except (OSError, ValueError, TypeError):
+        return None
+    return None
 
 def _nmap_vendor(entry) -> str | None:
     """Return Nmap's OUI vendor for a host, tolerating missing/junk blocks."""
@@ -216,6 +378,37 @@ async def discover_hosts(network: str) -> list[dict[str, str]]:
             except Exception as exc:
                 logger.debug(f"[IRIS] Skipping nmap entry {ip!r}: {exc}")
                 continue
+
+    # Without CAP_NET_RAW the Scapy sweep cannot bind, and Nmap only reports a
+    # MAC when it can open a raw socket too. The kernel's ARP cache still holds
+    # the answer: ordinary UDP sends force resolution, then the cache is read.
+    # This is what gives unprivileged scans vendor/OUI evidence for phones.
+    missing_mac = [
+        ip for ip, record in hosts_by_ip.items()
+        if not (isinstance(record.get("mac"), str)
+                and record["mac"].strip().upper() not in ("", "UNKNOWN"))
+    ]
+    if missing_mac:
+        try:
+            neighbour_macs = await loop.run_in_executor(
+                _nmap_executor, _neighbour_macs, missing_mac)
+        except Exception as exc:
+            logger.debug(f"[IRIS] Neighbour lookup failed: {exc}")
+            neighbour_macs = {}
+        for ip, mac in (neighbour_macs or {}).items():
+            record = hosts_by_ip.get(ip)
+            if (record is not None
+                    and str(record.get("mac", "")).strip().upper()
+                    in ("", "UNKNOWN")):
+                record["mac"] = mac
+
+    # The scanner's own address is never in the ARP cache; its NIC knows it.
+    for ip, record in hosts_by_ip.items():
+        if str(record.get("mac", "")).strip().upper() not in ("", "UNKNOWN"):
+            continue
+        mac = _local_mac(ip)
+        if mac:
+            record["mac"] = mac
 
     # Nmap's ping sweep does not ask NSS, so mDNS/DHCP names are missing on
     # most home networks. Resolve them once, with a bounded wait per address.
