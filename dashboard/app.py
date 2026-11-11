@@ -71,6 +71,18 @@ def _actionable_unacked_alerts_sync() -> list[dict]:
     ) or []
     return [row for row in rows if alert_is_actionable(row, active, live_ids)]
 
+
+def _alert_severity(row, default: int = 3) -> int:
+    """Numeric Suricata severity, defaulting malformed rows to INFO.
+
+    The dashboard renders ``severity <= 1`` as CRITICAL; a stray string in
+    the column must not make the context endpoint fail.
+    """
+    try:
+        return int(_row_get(row, 'severity') or default)
+    except (TypeError, ValueError):
+        return default
+
 # Background event loop daemon — one loop reused across all requests
 _bg_loop: asyncio.AbstractEventLoop | None = None
 _bg_loop_lock = threading.Lock()
@@ -965,6 +977,8 @@ def api_context():
         is_scanning = db.fetch_val(
             "SELECT COUNT(*) FROM scans WHERE status='RUNNING'", default=0
         ) > 0
+        unacked = _actionable_unacked_alerts_sync()
+        critical = [row for row in unacked if _alert_severity(row) <= 1]
         return jsonify({
             'target': target,
             'profile': profile,
@@ -975,7 +989,13 @@ def api_context():
             'role': getattr(g, 'role', 'viewer'),
             'shield_dry_run': bool(_settings.shield_cfg.dry_run),
             'shield_auto_quarantine': bool(_settings.shield_cfg.auto_quarantine),
-            'unacknowledged_alerts': len(_actionable_unacked_alerts_sync()),
+            'unacknowledged_alerts': len(unacked),
+            'critical_alerts': len(critical),
+            # Monotonic alert id, so acking the newest critical alert cannot
+            # hide the arrival of the next one from the audible cue.
+            'last_critical_alert_id': max(
+                (_row_get(row, 'id', 0) or 0) for row in critical
+            ) if critical else 0,
             'active_blocks': db.fetch_val(
                 "SELECT COUNT(*) FROM shield_actions WHERE is_active=1", default=0
             ) or 0,

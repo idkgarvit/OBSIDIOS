@@ -208,6 +208,7 @@ async function logout() {
   currentUser = {user: '', role: 'viewer'};
   window._dashInited = false;
   cveData = []; hostData = []; sentinelData = []; timelineData = [];
+  _lastCriticalAlertId = null;
   auditLogData = [];
   closeHostDrawer({sync: false});
   // Do not leave the previous investigation target in the address bar — on a
@@ -290,6 +291,7 @@ async function loadContext() {
     if (shieldEl) shieldEl.style.color = c.shield_dry_run ? 'var(--amber)' : 'var(--red)';
     setText('ctx-blocks', c.active_blocks || 0);
     setText('ctx-unack', c.unacknowledged_alerts || 0);
+    noteCriticalAlerts(c.last_critical_alert_id);
     setText('acct-target', c.target);
     setText('acct-shield', c.shield_dry_run ? 'dry-run' : 'enforce');
     if (c.user) {
@@ -450,6 +452,82 @@ function apiErrorToast(method, url, detail) {
     .replace(/^\/api\//, '');
   showToast(method + ' /' + path + ' failed — ' + detail, 'error');
 }
+
+/* ── ALERT SOUND ──
+   A background tab is silent, so a critical SENTINEL alert gets a short
+   two-tone chime. Synthesised with WebAudio: no asset to serve and nothing
+   to download. The first context sample is a baseline, so logging in with a
+   backlog of existing alerts does not beep at the operator. */
+const ALERT_SOUND_KEY = 'obsidios_alert_sound';
+let _alertAudioCtx = null;
+let _lastCriticalAlertId = null;
+
+function alertSoundEnabled() {
+  return localStorage.getItem(ALERT_SOUND_KEY) !== '0';
+}
+
+function setAlertSound(enabled) {
+  localStorage.setItem(ALERT_SOUND_KEY, enabled ? '1' : '0');
+  renderAlertSoundToggle();
+  if (enabled) playAlertTone(); // audible confirmation of the toggle
+}
+
+function renderAlertSoundToggle() {
+  const el = document.getElementById('alert-sound-toggle');
+  if (!el) return;
+  const on = alertSoundEnabled();
+  el.textContent = on ? '🔊' : '🔇';
+  el.title = on ? 'Alert sound on — click to mute' : 'Alert sound muted — click to enable';
+  el.setAttribute('aria-label', el.title);
+  el.setAttribute('aria-pressed', String(on));
+}
+
+function playAlertTone() {
+  if (!alertSoundEnabled()) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!_alertAudioCtx) _alertAudioCtx = new Ctx();
+    const ctx = _alertAudioCtx;
+    if (ctx.state === 'suspended') ctx.resume();
+    [[880, 0, 0.11], [1174.66, 0.13, 0.15]].forEach(([freq, at, dur]) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const t0 = ctx.currentTime + at;
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, t0);
+      // Envelope the gain: a raw oscillator start/stop clicks audibly.
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.exponentialRampToValueAtTime(0.08, t0 + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur + 0.02);
+    });
+  } catch (e) { /* audio is best-effort; never break the poll */ }
+}
+
+function unlockAlertAudio() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!_alertAudioCtx) _alertAudioCtx = new Ctx();
+    if (_alertAudioCtx.state === 'suspended') _alertAudioCtx.resume();
+  } catch (e) { /* no audio device */ }
+}
+
+function noteCriticalAlerts(newestId) {
+  const id = Number(newestId) || 0;
+  // A monotonic id, not a count: acknowledging one critical alert while
+  // another arrives must still produce a beep. The first sample is the
+  // baseline so a pre-existing backlog does not beep on login.
+  if (_lastCriticalAlertId !== null && id > _lastCriticalAlertId) playAlertTone();
+  _lastCriticalAlertId = Math.max(_lastCriticalAlertId ?? 0, id);
+}
+
+// Browsers suspend WebAudio until the page has seen a gesture. The login
+// click covers normal use; this also unlocks after an SSO refresh.
+document.addEventListener('pointerdown', unlockAlertAudio, {passive: true, once: true});
 
 /* ── NAVIGATION ── */
 function showPage(id){
@@ -2712,6 +2790,8 @@ function initDashboard() {
     // Show last page after initial dashboard setup is complete
     safeTimeout(() => gotoPage(savedPage), 500, 'global');
   }
+  renderAlertSoundToggle();
+  _lastCriticalAlertId = null;
   updateStats();
   loadShield();
   loadShieldWidget();
@@ -3273,6 +3353,7 @@ const CLICK_ACTIONS = {
   stab: el => stab(el),
   updateStats: () => updateStats(),
   toggleZen: () => toggleZen(),
+  toggleAlertSound: () => setAlertSound(!alertSoundEnabled()),
   toggleScan: () => toggleScan(),
   toggleNV: () => toggleNV(),
   switchAct: el => switchAct(el, el.dataset.arg),

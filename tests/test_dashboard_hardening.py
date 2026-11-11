@@ -2034,6 +2034,33 @@ class TestRemainingActionSuccess:
         assert response.status_code == 200
 
 
+class TestCriticalAlertCount:
+    """The context poll drives the dashboard's critical alert tone."""
+
+    def test_malformed_severity_defaults_to_info(self):
+        rows = _sqlite_rows(
+            ("severity",),
+            [(1,), ("2",), (None,), ("HIGH",), (0,)])
+        assert [dash._alert_severity(row) for row in rows] == [1, 2, 3, 3, 3]
+
+    def test_context_counts_only_critical_unacked_alerts(self, client, monkeypatch):
+        headers = _auth(client)
+        rows = _sqlite_rows(
+            ("id", "severity"),
+            [(4, 1), (7, 1), (9, 2), (12, 3)])
+        monkeypatch.setattr(dash, "_actionable_unacked_alerts_sync", lambda: rows)
+        monkeypatch.setattr(
+            dash.db, "fetch_val",
+            lambda sql, *_a, **_k: 0 if "COUNT(*)" in sql else None)
+        monkeypatch.setattr(dash.db, "fetch_one", lambda *_a, **_k: None)
+
+        data = client.get("/api/v2/context", headers=headers).get_json()
+
+        assert data["unacknowledged_alerts"] == 4
+        assert data["critical_alerts"] == 2
+        assert data["last_critical_alert_id"] == 7
+
+
 class TestRunDashboardDatabaseFailure:
     def test_init_failure_warns_and_continues(self, monkeypatch):
         def broken(coro, *_args, **_kwargs):

@@ -215,6 +215,7 @@ html,body{background:var(--bg);color:var(--t1);font-family:var(--sans);font-size
   color:var(--t3);cursor:pointer;font-size:13px;user-select:none;
 }
 .tb-zen:hover{background:var(--s3);color:var(--t1)}
+#alert-sound-toggle[aria-pressed="false"]{opacity:.45}
 .acct{position:relative}
 .avatar{
   width:28px;height:28px;border-radius:50%;background:var(--s3);border:1px solid var(--line-2);
