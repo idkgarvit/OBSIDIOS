@@ -77,10 +77,14 @@ The current build contains:
 - A network interface in the target subnet (for ARP scanning)
 - Python 3.13, `nmap`, and Pango/Cairo libraries if you run the CLI or dashboard outside Docker
 
-> **Precise ARP without running as root.** Docker already grants `NET_RAW` to
-> the daemon. On bare metal, IRIS tries Scapy first, then `arp-scan` (direct,
-> then `sudo -n`), then the kernel neighbour cache. For the active sweep
-> without making the scanner root, grant the capability to that one binary:
+> **ARP precision without root.** OBSIDIOS never needs sudo. When Scapy cannot
+> open a raw socket, IRIS primes the target subnet with ordinary UDP sends and
+> reads the kernel neighbour table: the kernel performs ARP on behalf of any
+> socket, so this is a full active sweep with the same MAC/OUI results and no
+> capability at all. Scapy remains the faster path when `NET_RAW` is present,
+> and Docker grants it already.
+>
+> Optionally, give the external `arp-scan` tool that single capability:
 >
 > ```bash
 > sudo apt install arp-scan
@@ -94,9 +98,9 @@ The current build contains:
 > sudo chmod 440 /etc/sudoers.d/obsidios-arp
 > ```
 >
-> `sudo -n` never prompts, so an unconfigured host simply falls back. Do not
-> give passwordless sudo to `python` or set capabilities on the interpreter —
-> either applies to every script it runs, not just the ARP probe.
+> `sudo -n` never prompts, so an unconfigured host simply falls through to the
+> kernel sweep. Do not give passwordless sudo to `python` or set capabilities
+> on the interpreter — either applies to every script it runs.
 
 ### 1. Clone & Configure
 

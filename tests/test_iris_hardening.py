@@ -209,9 +209,27 @@ class TestArpScanFallback:
             wired, "_arp_scan_cli",
             lambda _net, _iface: [
                 {"ip": "10.44.0.2", "mac": "A4:50:46:11:22:33"}])
+        monkeypatch.setattr(
+            wired, "_arp_table_sweep",
+            lambda *_a, **_k: (_ for _ in ()).throw(
+                AssertionError("table sweep must not run when arp-scan works")))
 
         assert wired._arp_sweep("10.44.0.0/24", 2.0) == [
             {"ip": "10.44.0.2", "mac": "A4:50:46:11:22:33"}]
+
+    def test_unprivileged_table_sweep_is_the_last_resort(self, monkeypatch):
+        def no_root(*_a, **_k):
+            raise PermissionError("raw socket permission denied")
+
+        monkeypatch.setattr(wired, "srp", no_root)
+        monkeypatch.setattr(wired, "_arp_scan_cli", lambda *_a: [])
+        monkeypatch.setattr(
+            wired, "_arp_table_sweep",
+            lambda net, wait: [
+                {"ip": "10.44.0.3", "mac": "EC:FA:BC:44:55:66"}])
+
+        assert wired._arp_sweep("10.44.0.0/24", 2.0) == [
+            {"ip": "10.44.0.3", "mac": "EC:FA:BC:44:55:66"}]
 
     def test_plain_output_is_parsed_and_junk_dropped(self):
         stdout = (
@@ -304,6 +322,50 @@ class TestNeighbourFallback:
             "10.44.0.5": "EC:FA:BC:44:55:66",
         }
 
+    def test_trusted_only_keeps_only_freshly_resolved_entries(self, monkeypatch):
+        class Result:
+            returncode = 0
+            stdout = (
+                "10.44.0.2 dev eth0 lladdr a4:50:46:11:22:33 REACHABLE\n"
+                "10.44.0.3 dev eth0 lladdr EC:FA:BC:44:55:66 STALE\n"
+                "10.44.0.4 dev eth0 lladdr A4:50:46:77:88:99 DELAY\n"
+                "10.44.0.5 dev eth0 lladdr A4:50:46:00:11:22 PROBE\n"
+                "10.44.0.6 dev eth0  INCOMPLETE\n"
+            )
+
+        monkeypatch.setattr(
+            wired.subprocess, "run", lambda *_a, **_k: Result())
+
+        assert wired._read_neighbour_table(trusted_only=True) == {
+            "10.44.0.2": "A4:50:46:11:22:33",
+            "10.44.0.4": "A4:50:46:77:88:99",
+            "10.44.0.5": "A4:50:46:00:11:22",
+        }
+
+    def test_proc_arp_trusted_only_requires_atf_com(self, monkeypatch, tmp_path):
+        arp = tmp_path / "arp"
+        arp.write_text(
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+            "10.44.0.6        0x1         0x2         A4:50:46:77:88:99     *        eth0\n"
+            "10.44.0.8        0x1         0x0         A4:50:46:AA:BB:CC     *        eth0\n")
+
+        def no_ip(*_a, **_k):
+            raise FileNotFoundError("ip")
+
+        monkeypatch.setattr(wired.subprocess, "run", no_ip)
+        real_open = open
+        monkeypatch.setattr(
+            "builtins.open",
+            lambda path, *a, **k: real_open(
+                arp if path == "/proc/net/arp" else path, *a, **k))
+
+        assert wired._read_neighbour_table(trusted_only=True) == {
+            "10.44.0.6": "A4:50:46:77:88:99"}
+        assert wired._read_neighbour_table() == {
+            "10.44.0.6": "A4:50:46:77:88:99",
+            "10.44.0.8": "A4:50:46:AA:BB:CC",
+        }
+
     def test_missing_iproute2_falls_back_to_proc_arp(self, monkeypatch, tmp_path):
         arp = tmp_path / "arp"
         arp.write_text(
@@ -347,6 +409,67 @@ class TestNeighbourFallback:
         hosts = asyncio.run(wired.discover_hosts("10.44.0.0/24"))
         assert hosts == [
             {"ip": "10.44.0.7", "mac": "A4:50:46:AA:BB:CC"}]
+
+
+class TestArpTableSweep:
+    """The kernel performs ARP for ordinary UDP sends; no capability needed."""
+
+    def test_sends_every_address_and_keeps_only_the_subnet(self, monkeypatch):
+        sent, sockets = [], []
+
+        class Sock:
+            def setblocking(self, _flag):
+                pass
+
+            def sendto(self, _payload, target):
+                sent.append(target[0])
+
+            def close(self):
+                pass
+
+        def fake_socket(*_a, **_k):
+            sock = Sock()
+            sockets.append(sock)
+            return sock
+
+        monkeypatch.setattr(wired.socket, "socket", fake_socket)
+        monkeypatch.setattr(wired.time, "sleep", lambda _s: None)
+        monkeypatch.setattr(
+            wired, "_read_neighbour_table",
+            lambda **_kwargs: {
+                "10.44.0.5": "A4:50:46:11:22:33",
+                "10.44.1.5": "EC:FA:BC:44:55:66",  # outside the target
+                "junk": "AA:BB:CC:DD:EE:FF",
+            })
+
+        hosts = wired._arp_table_sweep("10.44.0.0/29", chunk=2)
+
+        assert hosts == [
+            {"ip": "10.44.0.5", "mac": "A4:50:46:11:22:33"}]
+        assert sent == ["10.44.0.1", "10.44.0.2", "10.44.0.3",
+                        "10.44.0.4", "10.44.0.5", "10.44.0.6"]
+        # Six addresses at two sends per socket: the buffer never fills.
+        assert len(sockets) == 3
+
+    def test_oversized_network_is_refused_before_sending(self, monkeypatch):
+        def no_socket(*_a, **_k):
+            raise AssertionError("an oversized network must not be probed")
+
+        monkeypatch.setattr(wired.socket, "socket", no_socket)
+
+        assert wired._arp_table_sweep("10.44.0.0/16", max_hosts=64) == []
+
+    def test_invalid_network_returns_no_hosts(self):
+        assert wired._arp_table_sweep("not-a-network") == []
+
+    def test_socket_failure_is_not_fatal(self, monkeypatch):
+        def no_socket(*_a, **_k):
+            raise OSError("network unreachable")
+
+        monkeypatch.setattr(wired.socket, "socket", no_socket)
+        monkeypatch.setattr(wired.time, "sleep", lambda _s: None)
+
+        assert wired._arp_table_sweep("10.44.0.0/30") == []
 
 
 class TestRunScan:

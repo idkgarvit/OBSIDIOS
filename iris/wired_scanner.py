@@ -113,10 +113,13 @@ def _arp_sweep(network: str, timeout: float) -> list[dict[str, str]]:
         return [{"ip": r.psrc, "mac": r.hwsrc.upper()} for _, r in answered]
     except Exception as exc:
         # Scapy needs CAP_NET_RAW. Rather than run the whole scanner as root,
-        # fall back to arp-scan, which can be given that one capability (or a
-        # single NOPASSWD sudoers rule) without widening the app's privileges.
-        logger.info(f"[IRIS] Scapy ARP unavailable ({exc}); trying arp-scan")
-        return _arp_scan_cli(network, iface)
+        # try arp-scan (one narrow capability or sudoers rule) and then an
+        # entirely unprivileged kernel-assisted sweep.
+        logger.info(f"[IRIS] Scapy ARP unavailable ({exc}); using ARP fallback")
+        hosts = _arp_scan_cli(network, iface)
+        if hosts:
+            return hosts
+        return _arp_table_sweep(network, wait=timeout)
 
 
 _ARP_SCAN_PATHS = (
@@ -178,12 +181,17 @@ def _arp_scan_cli(network: str, iface: str | None) -> list[dict[str, str]]:
 _MAC_RE = re.compile(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
 
 
-def _read_neighbour_table() -> dict[str, str]:
+_NEIGHBOUR_LIVE_STATES = {"REACHABLE", "DELAY", "PROBE"}
+
+
+def _read_neighbour_table(trusted_only: bool = False) -> dict[str, str]:
     """Return IP → MAC from the kernel ARP cache.
 
     Reading the cache needs no privileges; only sending raw ARP frames does.
     ``ip neigh`` is preferred because it exposes entry state, and
-    ``/proc/net/arp`` covers images without iproute2.
+    ``/proc/net/arp`` covers images without iproute2. With ``trusted_only``,
+    stale entries are dropped: after a fresh probe a live host is REACHABLE
+    (or DELAY/PROBE), while a departed one has no usable MAC.
     """
     table: dict[str, str] = {}
     try:
@@ -199,10 +207,13 @@ def _read_neighbour_table() -> dict[str, str]:
             if len(parts) < 3:
                 continue
             mac = next((p for p in parts if _MAC_RE.fullmatch(p)), None)
+            state = parts[-1].upper()
             # A FAILED/INCOMPLETE entry is a resolution in progress, not an
             # identity; an all-zero address is the kernel's placeholder.
+            if (trusted_only and state not in _NEIGHBOUR_LIVE_STATES):
+                continue
             if (mac and mac.upper() != "00:00:00:00:00:00"
-                    and not any(s in parts for s in ("FAILED", "INCOMPLETE"))):
+                    and state not in ("FAILED", "INCOMPLETE")):
                 table[parts[0]] = mac.upper()
     if table:
         return table
@@ -214,6 +225,12 @@ def _read_neighbour_table() -> dict[str, str]:
                 if len(cols) < 4:
                     continue
                 mac = cols[3]
+                if trusted_only:
+                    try:
+                        if not int(cols[2], 16) & 0x2:  # ATF_COM
+                            continue
+                    except ValueError:
+                        continue
                 if (_MAC_RE.fullmatch(mac)
                         and mac.upper() != "00:00:00:00:00:00"):
                     table[cols[0]] = mac.upper()
@@ -252,6 +269,55 @@ def _neighbour_macs(ips: list[str]) -> dict[str, str]:
     """Prime the ARP cache for ``ips`` and return whatever it resolved."""
     _prime_neighbours(ips)
     return _read_neighbour_table()
+
+
+def _arp_table_sweep(
+    network: str, wait: float = 2.5, max_hosts: int = 1024, chunk: int = 32,
+) -> list[dict[str, str]]:
+    """Unprivileged ARP sweep through the kernel neighbour table.
+
+    One UDP send per address makes the kernel broadcast an ARP request; a live
+    host answers and the result is readable from ``ip neigh`` without any
+    capability. Sockets are rotated every ``chunk`` sends because queued
+    packets for absent hosts fill the send buffer (EAGAIN) long before a /24
+    is covered.
+    """
+    try:
+        net = ipaddress.ip_network(network, strict=False)
+    except ValueError:
+        return []
+    addresses = [str(ip) for ip in net.hosts()]
+    if not addresses or len(addresses) > max_hosts:
+        logger.debug(
+            f"[IRIS] Skipping table ARP sweep for {network}: "
+            f"{len(addresses)} addresses exceeds {max_hosts}")
+        return []
+    for start in range(0, len(addresses), chunk):
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setblocking(False)
+            for ip in addresses[start:start + chunk]:
+                try:
+                    sock.sendto(b"\x00", (ip, 9))
+                except OSError:
+                    continue
+        except OSError as exc:
+            logger.debug(f"[IRIS] Table ARP sweep unavailable: {exc}")
+            return []
+        finally:
+            if sock is not None:
+                sock.close()
+    time.sleep(max(0.5, min(float(wait), 5.0)))
+    table = _read_neighbour_table(trusted_only=True)
+    hosts: list[dict[str, str]] = []
+    for ip, mac in table.items():
+        try:
+            if ipaddress.ip_address(ip) in net:
+                hosts.append({"ip": ip, "mac": mac})
+        except ValueError:
+            continue
+    return hosts
 
 
 def _local_mac(ip: str) -> str | None:
