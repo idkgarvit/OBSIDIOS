@@ -100,7 +100,7 @@ class TestAuditTimeline:
             "FROM sentinel_alerts": [
                 {"id": 3, "alerted_at": 200.0, "rule_sid": 9000001,
                  "src_ip": "10.0.0.7", "dst_ip": "10.0.0.8", "dst_port": 443,
-                 "severity": 1, "message": "exploit attempt", "predicted": 1,
+                 "severity": 1, "message": "exploit attempt", "predicted": 0,
                  "acknowledged": 0},
             ],
             "FROM forge_rules": [
@@ -140,10 +140,12 @@ class TestAuditTimeline:
 
         monkeypatch.setattr("dashboard.app.db.fetch_all", fake_all)
         assert client.get("/api/v2/audit/timeline?limit=99999", headers=h).status_code == 200
-        assert all(params == (500,) for params in seen)
+        paged = [params for params in seen if params]
+        assert paged and all(params == (500,) for params in paged)
         seen.clear()
         assert client.get("/api/v2/audit/timeline?limit=nonsense", headers=h).status_code == 200
-        assert all(params == (100,) for params in seen)
+        paged = [params for params in seen if params]
+        assert paged and all(params == (100,) for params in paged)
 
     def test_null_rule_sid_gets_a_readable_title(self, client, monkeypatch):
         """A Suricata-native alert has no rule_sid; the feed must not say 'SID None'."""

@@ -129,7 +129,7 @@ class TestCsvExport:
         assert "CVE-2026-0001" in rv.get_data(as_text=True)
 
         sql = " ".join(captured)
-        assert "pc.dismissed = 0" in sql
+        assert "COALESCE(pc.dismissed, 0) = 0" in sql
         assert "h.is_active = 1" in sql
 
     def test_unsupported_format_is_rejected(self, client):
@@ -659,8 +659,8 @@ class TestGraphEndpointResilience:
 
         def fake_all(sql, params=()):
             queries.append(sql)
-            if "SELECT id, ip, risk_score, os_name, vendor FROM hosts" in sql:
-                return [{"id": "10.0.0.5", "ip": "10.0.0.5",
+            if "SELECT ip, risk_score, os_name, vendor FROM hosts" in sql:
+                return [{"ip": "10.0.0.5",
                          "risk_score": 10, "os_name": "Linux", "vendor": None}]
             return []
 
@@ -678,7 +678,6 @@ class TestGraphEndpointResilience:
         import dashboard.app as dash
 
         headers = self._auth(client)
-        queries = []
 
         def fake_val(sql, params=(), default=None):
             if "graph_cache" in sql:
@@ -688,11 +687,14 @@ class TestGraphEndpointResilience:
                     {"id": 5},
                     {"id": "", "risk": 1},
                     {"id": "10.0.0.1", "risk": 9, "os": "Linux"},
+                    {"id": "10.0.0.99", "risk": 3, "os": "Gone"},
                 ]})
             return default
 
         def fake_all(sql, params=()):
-            queries.append(sql)
+            if "SELECT ip, risk_score, os_name, vendor FROM hosts" in sql:
+                return [{"ip": "10.0.0.1", "risk_score": 9,
+                         "os_name": "Linux", "vendor": None}]
             return []
 
         monkeypatch.setattr(dash.db, "fetch_val", fake_val)
@@ -700,12 +702,10 @@ class TestGraphEndpointResilience:
 
         rv = client.get("/api/v2/graph", headers=headers)
         assert rv.status_code == 200, rv.data[:200]
+        # Junk entries are ignored and a cached node for a host that is no
+        # longer active must not reappear in the topology.
         assert rv.get_json()["nodes"] == [
             {"id": "10.0.0.1", "risk": 9, "os": "Linux"}]
-        assert not any(
-            "SELECT id, ip, risk_score, os_name, vendor FROM hosts" in sql
-            for sql in queries
-        )
 
     def test_corrupt_path_json_is_skipped(self, client, monkeypatch):
         import dashboard.app as dash
@@ -716,16 +716,14 @@ class TestGraphEndpointResilience:
         def fake_val(sql, params=(), default=None):
             if "graph_cache" in sql:
                 return None
-            if "MAX(simulated_at)" in sql:
-                return 1234.0
             return default
 
         def fake_all(sql, params=()):
-            if "SELECT id, ip, risk_score, os_name, vendor FROM hosts" in sql:
+            if "SELECT ip, risk_score, os_name, vendor FROM hosts" in sql:
                 return [
-                    {"id": "10.0.0.1", "ip": "10.0.0.1", "risk_score": 5,
+                    {"ip": "10.0.0.1", "risk_score": 5,
                      "os_name": "Linux", "vendor": None},
-                    {"id": "10.0.0.2", "ip": "10.0.0.2", "risk_score": 5,
+                    {"ip": "10.0.0.2", "risk_score": 5,
                      "os_name": "Linux", "vendor": None},
                 ]
             if "path_json" in sql:
@@ -753,8 +751,8 @@ class TestGraphEndpointResilience:
         captured = {}
 
         def fake_all(sql, params=()):
-            if "SELECT id, ip, risk_score, os_name, vendor FROM hosts" in sql:
-                return [{"id": "10.0.0.1", "ip": "10.0.0.1", "risk_score": 5,
+            if "SELECT ip, risk_score, os_name, vendor FROM hosts" in sql:
+                return [{"ip": "10.0.0.1", "risk_score": 5,
                          "os_name": "Linux", "vendor": None}]
             if "FROM hosts h JOIN ports p" in sql:
                 captured["critical_sql"] = sql
@@ -769,6 +767,7 @@ class TestGraphEndpointResilience:
         assert "COALESCE(pc.dismissed,0)=0" in sql
         assert "NOT_AFFECTED" in sql
         assert "h.is_active=1" in sql
+        assert "p.state='open'" in sql
 
 
 class TestNetworkStats:

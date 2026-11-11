@@ -572,7 +572,7 @@ select:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(91,141,238,.15)}
       </div>
       <div class="si" data-page="attacks" data-action="siClick" title="Attack Vectors">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="3" cy="4" r="1.5"/><circle cx="13" cy="5" r="1.5"/><circle cx="8" cy="13" r="1.5"/><path d="M4.3 4.8 11.5 4.9M12 6.2 9 11.6M6.8 12.4 4.2 5.4"/></svg>
-        <span>Attack paths</span>
+        <span>Attack Vectors</span>
         <span class="sib a" id="attack-sib">0</span>
       </div>
       <div class="si" data-page="ai" data-action="siClick" title="AI Analysis">
@@ -1082,7 +1082,7 @@ select:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(91,141,238,.15)}
         <div class="eyebrow">Investigate</div>
         <h1>Findings</h1>
         <div class="page-sub">
-          <b id="find-total">0</b> CVEs<span class="sep">·</span>
+          <b id="find-total">0</b> findings<span class="sep">·</span>
           <b id="find-critical">0</b> critical<span class="sep">·</span>
           <b id="find-high">0</b> high<span class="sep">·</span>
           <b id="find-predicted">0</b> predicted paths
@@ -1265,7 +1265,7 @@ select:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(91,141,238,.15)}
         Forge Rules
       </div>
       <div style="display:flex;gap:8px;align-items:center">
-        <span style="font-size:10px;color:var(--t3);font-family:var(--mono)"><span id="forge-total">0</span> rules</span>
+        <span style="font-size:10px;color:var(--t3);font-family:var(--mono)"><span id="forge-total">0 rules · 0 active</span></span>
         <button class="btn btn-secondary" style="font-size:9px;padding:4px 12px" data-action="loadForge">Refresh</button>
         <button class="btn btn-primary" style="font-size:9px;padding:4px 12px" data-action="rewriteForge">Redeploy</button>
       </div>
@@ -1291,7 +1291,7 @@ select:focus{border-color:var(--blue);box-shadow:0 0 0 2px rgba(91,141,238,.15)}
         Sentinel Alerts
       </div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <span style="font-size:10px;color:var(--t3);font-family:var(--mono)"><span id="sentinel-total">0</span> alerts · <span id="sentinel-predicted">0</span> predicted · <span id="sentinel-unacked">0</span> unacked</span>
+        <span style="font-size:10px;color:var(--t3);font-family:var(--mono)"><span id="sentinel-total">0</span> alerts · <span id="sentinel-predicted">0</span> live predicted · <span id="sentinel-unacked">0</span> unacked</span>
         <select id="sentinel-filter" class="tbl-filter" data-change="filterSentinel" aria-label="Filter sentinel alerts">
           <option value="all">All alerts</option>
           <option value="unacked">Unacknowledged</option>

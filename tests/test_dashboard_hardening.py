@@ -1365,6 +1365,7 @@ class TestPdfReport:
     def test_null_legacy_fields_do_not_blank_the_report(self, client,
                                                         monkeypatch):
         rows = {
+            "FROM attack_paths": [],
             "FROM hosts": [{"ip": None, "mac": None, "hostname": None,
                             "os_name": None, "risk_score": None,
                             "asset_value": None}],

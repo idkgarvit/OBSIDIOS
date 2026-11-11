@@ -19,7 +19,57 @@ from flask import Flask, Response, g, jsonify, render_template, request
 from flask_socketio import SocketIO
 from loguru import logger
 
+from chronicle.live_state import alert_is_actionable, path_is_live
 from dashboard import db_sync as db
+
+# Every "current exposure" number joins the same three facts: the host is
+# still active, its service is still open, and the finding was not dismissed
+# or verified as not affecting the detected version.
+_LIVE_CVE_SQL = (
+    "FROM port_cves pc "
+    "JOIN cves c ON c.id = pc.cve_id "
+    "JOIN ports p ON p.id = pc.port_id "
+    "JOIN hosts h ON h.id = p.host_id "
+    "WHERE h.is_active = 1 AND p.state = 'open' "
+    "AND COALESCE(pc.dismissed, 0) = 0 "
+    "AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'"
+)
+
+
+def _active_ips_sync() -> set[str]:
+    rows = db.fetch_all(
+        "SELECT ip FROM hosts WHERE is_active=1 AND ip IS NOT NULL AND ip != ''"
+    ) or []
+    return {_row_get(row, 'ip') for row in rows if _row_get(row, 'ip')}
+
+
+def _live_path_rows_sync() -> list:
+    """Active attack paths whose every hop is still an active host."""
+    active = _active_ips_sync()
+    rows = db.fetch_all(
+        "SELECT * FROM attack_paths WHERE is_active=1 ORDER BY attacker_roi DESC"
+    ) or []
+    return [
+        row for row in rows
+        if path_is_live(_row_get(row, 'path_json'), active)
+    ]
+
+
+def _live_path_ids_sync() -> set[int]:
+    return {
+        path_id for path_id in (_row_get(row, 'id') for row in _live_path_rows_sync())
+        if path_id is not None
+    }
+
+
+def _actionable_unacked_alerts_sync() -> list[dict]:
+    """Unacknowledged alerts that still describe reachable exposure."""
+    active = _active_ips_sync()
+    live_ids = _live_path_ids_sync()
+    rows = db.fetch_all(
+        "SELECT * FROM sentinel_alerts WHERE acknowledged=0"
+    ) or []
+    return [row for row in rows if alert_is_actionable(row, active, live_ids)]
 
 # Background event loop daemon — one loop reused across all requests
 _bg_loop: asyncio.AbstractEventLoop | None = None
@@ -498,10 +548,14 @@ def metrics():
         if not token or not secrets.compare_digest(supplied, token):
             return jsonify({'error': 'Unauthorized'}), 401
     try:
-        hosts = db.fetch_val('SELECT COUNT(*) FROM hosts WHERE is_active=1', default=0) or 0
-        ports = db.fetch_val("SELECT COUNT(*) FROM ports WHERE state='open'", default=0) or 0
-        cves = db.fetch_val('SELECT COUNT(*) FROM cves', default=0) or 0
-        paths = db.fetch_val('SELECT COUNT(*) FROM attack_paths WHERE is_active=1', default=0) or 0
+        hosts = db.fetch_val(
+            'SELECT COUNT(*) FROM hosts WHERE is_active=1', default=0) or 0
+        ports = db.fetch_val(
+            "SELECT COUNT(*) FROM ports p JOIN hosts h ON h.id = p.host_id "
+            "WHERE p.state='open' AND h.is_active=1", default=0) or 0
+        cves = db.fetch_val(
+            f"SELECT COUNT(DISTINCT pc.cve_id) {_LIVE_CVE_SQL}", default=0) or 0
+        paths = len(_live_path_rows_sync())
         blocks = db.fetch_val('SELECT COUNT(*) FROM shield_actions WHERE is_active=1', default=0) or 0
         posture = 0.0
         try:
@@ -653,17 +707,22 @@ def sync_calculate_global_posture():
         hosts = db.fetch_all("SELECT risk_score FROM hosts WHERE is_active=1 AND ip IS NOT NULL AND ip != ''")
         if not hosts: return 100.0
         avg_risk = sum(h['risk_score'] for h in hosts) / len(hosts)
-        path_count = db.fetch_val('SELECT COUNT(*) FROM attack_paths WHERE is_active=1', default=0)
-        anom_count = db.fetch_val('SELECT COUNT(*) FROM anomalies WHERE acknowledged=0', default=0)
-        # Dismissed findings, NOT_AFFECTED verdicts and retired hosts must not
-        # drag the headline score down: the dashboard shows the same filtered
-        # set everywhere else.
+        path_count = len(_live_path_rows_sync())
+        anom_count = db.fetch_val(
+            "SELECT COUNT(*) FROM anomalies a JOIN hosts h ON h.id = a.host_id "
+            "WHERE a.acknowledged = 0 AND h.is_active = 1",
+            default=0,
+        )
+        # Dismissed findings, NOT_AFFECTED verdicts, closed ports and retired
+        # hosts must not drag the headline score down: the dashboard shows the
+        # same filtered set everywhere else.
         sev_counts = db.fetch_all(
             "SELECT c.severity, COUNT(*) as cnt FROM port_cves pc "
             "JOIN cves c ON c.id=pc.cve_id "
             "JOIN ports p ON p.id=pc.port_id "
             "JOIN hosts h ON h.id=p.host_id "
-            "WHERE h.is_active=1 AND COALESCE(pc.dismissed,0)=0 "
+            "WHERE h.is_active=1 AND p.state='open' "
+            "AND COALESCE(pc.dismissed,0)=0 "
             "AND COALESCE(pc.verified_status,'') != 'NOT_AFFECTED' "
             "GROUP BY c.severity"
         )
@@ -837,21 +896,35 @@ def index(): return render_template('index.html')
 def api_stats_v2():
     try:
         hosts = db.fetch_val("SELECT COUNT(*) FROM hosts WHERE is_active=1 AND ip IS NOT NULL AND ip != ''")
-        ports = db.fetch_val("SELECT COUNT(*) FROM ports WHERE state='open'")
-        cves = db.fetch_val('SELECT COUNT(*) FROM cves')
-        paths = db.fetch_val('SELECT COUNT(*) FROM attack_paths WHERE is_active=1')
+        # A closed port or an offline host is history, not current exposure.
+        ports = db.fetch_val(
+            "SELECT COUNT(*) FROM ports p JOIN hosts h ON h.id = p.host_id "
+            "WHERE p.state = 'open' AND h.is_active = 1"
+        )
+        cves = db.fetch_val(f"SELECT COUNT(DISTINCT pc.cve_id) {_LIVE_CVE_SQL}")
+        # Attack paths are only live while every hop still exists.
+        paths = len(_live_path_rows_sync())
         diffs = db.fetch_all('SELECT diff_type, detail, severity FROM scan_diffs ORDER BY created_at DESC LIMIT 15')
         total_scans = db.fetch_val("SELECT COUNT(*) FROM scans WHERE status='DONE'", default=0)
         is_scanning = db.fetch_val("SELECT COUNT(*) FROM scans WHERE status='RUNNING'", default=0) > 0
         scanner_enabled = db.fetch_val("SELECT value FROM system_settings WHERE key='scanner_enabled'", default='0') == '1'
         scan_phase = db.fetch_val("SELECT value FROM system_settings WHERE key='scan_phase'", default='')
         posture = sync_calculate_global_posture()
-        
+
         total_hosts = db.fetch_val('SELECT COUNT(*) FROM hosts')
         offline = db.fetch_val('SELECT COUNT(*) FROM hosts WHERE is_active=0', default=0)
-        critical_cves = db.fetch_val("SELECT COUNT(*) FROM cves WHERE severity='CRITICAL'")
-        active_anomalies = db.fetch_val("SELECT COUNT(*) FROM anomalies WHERE acknowledged=0")
+        critical_cves = db.fetch_val(
+            f"SELECT COUNT(DISTINCT pc.cve_id) {_LIVE_CVE_SQL} "
+            "AND c.severity = 'CRITICAL'"
+        )
+        active_anomalies = db.fetch_val(
+            "SELECT COUNT(*) FROM anomalies a JOIN hosts h ON h.id = a.host_id "
+            "WHERE a.acknowledged = 0 AND h.is_active = 1"
+        )
         shield_blocks = db.fetch_val("SELECT COUNT(*) FROM shield_actions WHERE is_active=1")
+        # The top-bar chip is labelled "Alerts", not "Critical CVEs": show the
+        # unacknowledged Sentinel queue instead of reusing the CVE total.
+        alerts = len(_actionable_unacked_alerts_sync())
 
         return jsonify({
             'posture': posture, 'hosts': hosts or 0, 'online': hosts or 0, 'offline': offline or 0,
@@ -860,7 +933,7 @@ def api_stats_v2():
             'recent_diffs': diffs, 'total_hosts': total_hosts or 0, 'critical_cves': critical_cves or 0,
             'active_anomalies': active_anomalies or 0, 'shield_blocks': shield_blocks or 0,
             'scan_phase': scan_phase or '',
-            'alerts': critical_cves or 0, 'api_version': 'v2', 'timestamp': time.time()
+            'alerts': alerts, 'api_version': 'v2', 'timestamp': time.time()
         })
     except Exception as e:
         return _internal_error(e)
@@ -902,9 +975,7 @@ def api_context():
             'role': getattr(g, 'role', 'viewer'),
             'shield_dry_run': bool(_settings.shield_cfg.dry_run),
             'shield_auto_quarantine': bool(_settings.shield_cfg.auto_quarantine),
-            'unacknowledged_alerts': db.fetch_val(
-                "SELECT COUNT(*) FROM sentinel_alerts WHERE acknowledged=0", default=0
-            ) or 0,
+            'unacknowledged_alerts': len(_actionable_unacked_alerts_sync()),
             'active_blocks': db.fetch_val(
                 "SELECT COUNT(*) FROM shield_actions WHERE is_active=1", default=0
             ) or 0,
@@ -919,9 +990,21 @@ def api_context():
 @requires_auth
 def api_graph_v2():
     try:
-        # Prefer daemon's rich NetworkX node data from cache. A corrupt cache
-        # entry must degrade to a live query, not 500 the whole graph page.
-        nodes = None
+        # The cache is written by the daemon after a scan. It can be older than
+        # a sweep that just marked hosts offline, so only its entries for hosts
+        # that are active right now may reach the topology.
+        active_hosts = [
+            host for host in (db.fetch_all(
+                "SELECT ip, risk_score, os_name, vendor FROM hosts "
+                "WHERE is_active=1 AND ip IS NOT NULL AND ip != '' ORDER BY ip"
+            ) or [])
+            if isinstance(host.get('ip'), str) and host['ip'].strip()
+        ]
+        active_ips = [h['ip'] for h in active_hosts]
+        if not active_ips:
+            return jsonify({'nodes': [], 'links': [], 'blast_radius': []})
+
+        cache_by_ip: dict[str, dict] = {}
         cached = db.fetch_val("SELECT value FROM system_settings WHERE key='graph_cache'")
         if cached:
             try:
@@ -929,58 +1012,63 @@ def api_graph_v2():
                 if isinstance(graph, dict) and isinstance(graph.get('nodes'), list):
                     # Cached nodes are untrusted JSON written by another
                     # process; a junk entry used to 500 the whole graph.
-                    clean = [
-                        node for node in graph['nodes']
-                        if isinstance(node, dict)
-                        and isinstance(node.get('id'), str)
-                        and node['id'].strip()
-                    ]
-                    nodes = clean or None
+                    for node in graph['nodes']:
+                        if (
+                            isinstance(node, dict)
+                            and isinstance(node.get('id'), str)
+                            and node['id'].strip()
+                        ):
+                            cache_by_ip[node['id']] = node
             except (ValueError, TypeError) as exc:
                 logger.warning(f"[DASHBOARD] Ignoring corrupt graph cache: {exc}")
-        if nodes is None:
-            hosts = db.fetch_all('SELECT id, ip, risk_score, os_name, vendor FROM hosts WHERE is_active=1')
-            nodes = [
-                {'id': h['ip'], 'risk': h['risk_score'] or 0,
-                 'os': h['os_name'] or h['vendor'] or 'Unknown'}
-                for h in hosts
-                if isinstance(h.get('ip'), str) and h['ip'].strip()
-            ]
-        
+
+        nodes = [
+            cache_by_ip.get(host['ip']) or {
+                'id': host['ip'],
+                'risk': host['risk_score'] or 0,
+                'os': host['os_name'] or host['vendor'] or 'Unknown',
+            }
+            for host in active_hosts
+        ]
+        active_set = set(active_ips)
+
         # Build simplified links: gateway-star + attack-path edges
-        active_ips = [n['id'] for n in nodes]
         links = []
-        if not active_ips:
-            return jsonify({'nodes': [], 'links': [], 'blast_radius': []})
         gw = next((ip for ip in active_ips if ip.endswith('.1')), active_ips[0])
 
         # Every non-gateway node gets a PHYSICAL link to gateway
         links = [{'source': gw, 'target': ip, 'type': 'PHYSICAL'} for ip in active_ips if ip != gw]
 
-        # Overlay KILL_CHAIN links from attack paths (additional edges)
-        latest = db.fetch_val('SELECT MAX(simulated_at) FROM attack_paths')
-        if latest:
-            paths = db.fetch_all('SELECT path_json FROM attack_paths WHERE simulated_at >= ?', (latest-604800,))
-            seen = set()
-            for p in paths:
-                try:
-                    steps = json.loads(p['path_json'])
-                except (ValueError, TypeError):
-                    # One truncated row must not hide the entire graph.
+        # Overlay KILL_CHAIN links from live attack paths (additional edges).
+        # A path that still mentions an offline host is retired history and
+        # must not keep drawing edges through the surviving hops. Reuse the
+        # host list already fetched above instead of asking SQLite twice.
+        paths = db.fetch_all(
+            'SELECT path_json FROM attack_paths WHERE is_active=1 '
+            'ORDER BY attacker_roi DESC'
+        ) or []
+        seen = set()
+        for p in paths:
+            path_json = _row_get(p, 'path_json')
+            if not path_is_live(path_json, active_set):
+                continue
+            try:
+                steps = json.loads(path_json or '')
+            except (ValueError, TypeError):
+                # One truncated row must not hide the entire graph.
+                continue
+            if not isinstance(steps, list):
+                continue
+            for i in range(len(steps)-1):
+                if not (isinstance(steps[i], dict) and isinstance(steps[i+1], dict)):
                     continue
-                if not isinstance(steps, list):
-                    continue
-                for i in range(len(steps)-1):
-                    if not (isinstance(steps[i], dict) and isinstance(steps[i+1], dict)):
-                        continue
-                    s, d = steps[i].get('ip'), steps[i+1].get('ip')
-                    if s in active_ips and d in active_ips and d != gw:
-                        key = f'{s}->{d}'
-                        if key not in seen:
-                            seen.add(key)
-                            links.append({'source': s, 'target': d, 'type': 'KILL_CHAIN'})
+                s, d = steps[i].get('ip'), steps[i+1].get('ip')
+                if s in active_set and d in active_set and d != gw:
+                    key = f'{s}->{d}'
+                    if key not in seen:
+                        seen.add(key)
+                        links.append({'source': s, 'target': d, 'type': 'KILL_CHAIN'})
         
-        active_ips = {n['id'] for n in nodes}
         # Blast Radius: hosts with critical CVEs and their neighbors
         blast_radius = []
         critical = db.fetch_all(
@@ -988,7 +1076,8 @@ def api_graph_v2():
             "FROM hosts h JOIN ports p ON p.host_id = h.id "
             "JOIN port_cves pc ON pc.port_id = p.id "
             "JOIN cves c ON c.id = pc.cve_id "
-            "WHERE h.is_active=1 AND COALESCE(pc.dismissed,0)=0 "
+            "WHERE h.is_active=1 AND p.state='open' "
+            "AND COALESCE(pc.dismissed,0)=0 "
             "AND COALESCE(pc.verified_status,'') != 'NOT_AFFECTED' "
             "AND (h.risk_score > 70 OR c.severity='CRITICAL' "
             "OR (c.cvss_v3 IS NOT NULL AND c.cvss_v3 >= 9.0))"
@@ -1037,11 +1126,13 @@ def api_details_ports():
         state = (request.args.get('state') or 'open').strip().lower()
         if state not in ('open', 'filtered', 'closed', 'all'):
             return jsonify({'error': 'Invalid port state'}), 400
-        sql = ('SELECT h.ip, p.port, p.protocol, p.service, p.version, p.state '
-               'FROM ports p JOIN hosts h ON h.id = p.host_id')
+        sql = ('SELECT h.ip, h.risk_score, p.port, p.protocol, p.service, '
+               'p.version, p.state '
+               'FROM ports p JOIN hosts h ON h.id = p.host_id '
+               'WHERE h.is_active = 1')
         params = ()
         if state != 'all':
-            sql += ' WHERE p.state = ?'
+            sql += ' AND p.state = ?'
             params = (state,)
         ports = db.fetch_all(sql, params)
         return jsonify({'data': ports})
@@ -1053,7 +1144,16 @@ def api_details_ports():
 @requires_auth
 def api_details_paths():
     try:
-        res = db.fetch_all('SELECT attacker_roi, path_json, narrative FROM attack_paths WHERE is_active=1 ORDER BY attacker_roi DESC LIMIT 10')
+        # A path is only a prediction about the network that exists now.
+        # Retired hosts must not keep supplying "attack paths" to the UI.
+        res = [
+            {
+                'attacker_roi': _row_get(row, 'attacker_roi'),
+                'path_json': _row_get(row, 'path_json'),
+                'narrative': _row_get(row, 'narrative'),
+            }
+            for row in _live_path_rows_sync()[:10]
+        ]
         return jsonify({'data': res})
     except Exception as e:
         return _internal_error(e)
@@ -1088,7 +1188,9 @@ def api_host_detail():
             FROM port_cves pc
             JOIN cves c ON c.id = pc.cve_id
             JOIN ports p ON p.id = pc.port_id
-            WHERE p.host_id=? AND pc.dismissed=0
+            WHERE p.host_id=? AND p.state='open'
+              AND COALESCE(pc.dismissed, 0) = 0
+              AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'
             ORDER BY c.cvss_v3 DESC
         ''', (hid,))
         alerts = db.fetch_all(
@@ -1155,16 +1257,26 @@ def api_audit_timeline():
                 'host': r['target_ip'],
                 'counts': None,
             })
+        active = _active_ips_sync()
+        live_ids = _live_path_ids_sync()
         for r in db.fetch_all(
             'SELECT id, alerted_at, rule_sid, src_ip, dst_ip, dst_port, severity, '
-            'message, predicted, acknowledged FROM sentinel_alerts '
+            'message, predicted, acknowledged, attack_path_id FROM sentinel_alerts '
             'ORDER BY alerted_at DESC LIMIT ?', (limit,)
         ):
+            if r['acknowledged']:
+                alert_status = 'ACKED'
+            elif not alert_is_actionable(r, active, live_ids):
+                # History stays visible, but a prediction for a gone path is
+                # not an open action item.
+                alert_status = 'STALE'
+            else:
+                alert_status = 'OPEN'
             events.append({
                 'kind': 'ALERT', 'ts': r['alerted_at'], 'id': r['id'],
                 'title': f"SID {r['rule_sid']}" if r['rule_sid'] else 'Suricata alert',
                 'detail': str(r['message'] or ''),
-                'status': 'ACKED' if r['acknowledged'] else 'OPEN',
+                'status': alert_status,
                 'host': r['src_ip'],
                 'severity': r['severity'],
                 'counts': None,
@@ -1178,8 +1290,10 @@ def api_audit_timeline():
                 'kind': 'FORGE', 'ts': r['created_at'], 'id': r['id'],
                 'title': str(r['rule_category'] or '') + ' rule',
                 'detail': f"SID {r['rule_sid']} · {r['mitre_technique'] or 'unmapped'}",
-                # Only a rule that was in a written ruleset is deployed.
-                'status': 'DEPLOYED' if r['delivered_at'] else 'STAGED',
+                # Only a rule that is still active and was in a written
+                # ruleset is deployed; a retired path's rule is history.
+                'status': ('RETIRED' if not r['is_active']
+                           else 'DEPLOYED' if r['delivered_at'] else 'STAGED'),
                 'host': None,
                 'counts': None,
             })
@@ -1402,7 +1516,9 @@ def api_export_data(format_type):
                 'JOIN port_cves pc ON pc.cve_id = c.id '
                 'JOIN ports p ON p.id = pc.port_id '
                 'JOIN hosts h ON h.id = p.host_id '
-                'WHERE pc.dismissed = 0 AND h.is_active = 1'
+                "WHERE COALESCE(pc.dismissed, 0) = 0 "
+                "AND h.is_active = 1 AND p.state = 'open' "
+                "AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'"
             )
             headers = ['ip', 'cve_id', 'cvss_v3', 'severity']
         else:
@@ -1441,8 +1557,10 @@ def api_all_cves_v2():
             JOIN port_cves pc ON pc.cve_id = c.id
             JOIN ports p ON p.id = pc.port_id
             JOIN hosts h ON h.id = p.host_id
-            WHERE pc.dismissed = 0
+            WHERE COALESCE(pc.dismissed, 0) = 0
               AND h.is_active = 1
+              AND p.state = 'open'
+              AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'
             ORDER BY c.cvss_v3 DESC
         ''')
         return jsonify({'data': res})
@@ -1898,6 +2016,7 @@ def api_cve_exploit_status():
             "WHERE pc.exploit_status != ? "
             'AND COALESCE(pc.dismissed,0) = 0 '
             "AND COALESCE(pc.verified_status,'') != 'NOT_AFFECTED' "
+            "AND h.is_active = 1 AND p.state = 'open' "
             'ORDER BY c.cvss_v3 DESC', ('THEORETICAL',))
         return jsonify({'data': data, 'count': len(data)})
     except Exception as e:
@@ -1930,32 +2049,36 @@ def api_export_pdf():
             "JOIN port_cves pc ON pc.cve_id = c.id "
             "JOIN ports p ON p.id = pc.port_id "
             "JOIN hosts h ON h.id = p.host_id "
-            "WHERE h.is_active = 1 AND COALESCE(pc.dismissed, 0) = 0 "
+            "WHERE h.is_active = 1 AND p.state = 'open' "
+            "AND COALESCE(pc.dismissed, 0) = 0 "
             "AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED' "
             "ORDER BY c.cvss_v3 DESC LIMIT 50"
         )
         summary = db.fetch_all(
-            "SELECT c.severity, COUNT(*) as cnt FROM cves c "
+            "SELECT c.severity, COUNT(DISTINCT pc.cve_id) as cnt FROM cves c "
             "JOIN port_cves pc ON pc.cve_id = c.id "
             "JOIN ports p ON p.id = pc.port_id "
             "JOIN hosts h ON h.id = p.host_id "
-            "WHERE h.is_active = 1 AND COALESCE(pc.dismissed, 0) = 0 "
+            "WHERE h.is_active = 1 AND p.state = 'open' "
+            "AND COALESCE(pc.dismissed, 0) = 0 "
             "AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED' "
             "GROUP BY c.severity"
         )
         total_hosts = db.fetch_val('SELECT COUNT(*) FROM hosts WHERE is_active=1', default=0)
         total_cves = db.fetch_val(
-            "SELECT COUNT(*) FROM cves c "
+            "SELECT COUNT(DISTINCT pc.cve_id) FROM cves c "
             "JOIN port_cves pc ON pc.cve_id = c.id "
             "JOIN ports p ON p.id = pc.port_id "
             "JOIN hosts h ON h.id = p.host_id "
-            "WHERE h.is_active = 1 AND COALESCE(pc.dismissed, 0) = 0 "
+            "WHERE h.is_active = 1 AND p.state = 'open' "
+            "AND COALESCE(pc.dismissed, 0) = 0 "
             "AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'",
             default=0,
         )
-        total_paths = db.fetch_val('SELECT COUNT(*) FROM attack_paths WHERE is_active=1', default=0)
+        total_paths = len(_live_path_rows_sync())
         
-        sev_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+        sev_counts = {'CRITICAL': 0, 'HIGH': 0, 'MEDIUM': 0, 'LOW': 0,
+                      'INFO': 0}
         for r in summary:
             # Severity is nullable and legacy rows (or INFO/NONE findings) are
             # valid. Indexing the dict directly 500'd the whole export on the
@@ -2029,13 +2152,13 @@ tr:nth-child(even) {{ background: #f8f8fc; }}
 </div>
 
 <h2>Executive Summary</h2>
-<p>This report covers {total_hosts} active hosts with {total_cves} identified vulnerabilities ({sev_counts['CRITICAL']} critical, {sev_counts['HIGH']} high, {sev_counts['MEDIUM']} medium, {sev_counts['LOW']} low). {total_paths} adversarial attack paths were simulated.</p>
-<p><strong>Risk Profile:</strong> {critical_pct}% of vulnerabilities are critical severity, {high_pct}% are high severity. Prioritize remediation of critical CVEs with active exploit paths.</p>
+<p>This report covers {total_hosts} active hosts with {total_cves} distinct CVEs ({sev_counts['CRITICAL']} critical, {sev_counts['HIGH']} high, {sev_counts['MEDIUM']} medium, {sev_counts['LOW']} low, {sev_counts['INFO']} informational). {total_paths} adversarial attack paths are currently active.</p>
+<p><strong>Risk Profile:</strong> {critical_pct}% of CVEs are critical severity, {high_pct}% are high severity. Prioritize remediation of critical CVEs affecting active hosts.</p>
 
 <h2>Host Inventory</h2>
 <table><thead><tr><th>IP</th><th>MAC</th><th>Hostname</th><th>OS</th><th>Risk</th></tr></thead><tbody>{hosts_rows}</tbody></table>
 
-<h2>Vulnerability Details (Top 50 by CVSS)</h2>
+<h2>Vulnerability Details (Top 50 findings by CVSS)</h2>
 <table><thead><tr><th>Host</th><th>CVE</th><th>Severity</th><th>CVSS</th><th>Description</th></tr></thead><tbody>{cves_rows}</tbody></table>
 
 <h2>Methodology</h2>
@@ -2088,14 +2211,24 @@ def api_wireless():
 @requires_auth
 def api_sentinel_alerts():
     try:
-        alerts = db.fetch_all('''
+        alerts = [dict(row) for row in (db.fetch_all('''
             SELECT sa.id, sa.alerted_at, sa.rule_sid, sa.src_ip, sa.dst_ip,
                    sa.dst_port, sa.protocol, sa.severity, sa.message,
-                   sa.predicted, sa.acknowledged, fr.rule_category
+                   sa.predicted, sa.acknowledged, sa.attack_path_id,
+                   fr.rule_category
             FROM sentinel_alerts sa
             LEFT JOIN forge_rules fr ON fr.rule_sid = sa.rule_sid
             ORDER BY sa.alerted_at DESC LIMIT 50
-        ''')
+        ''') or [])]
+        # Mark predictions that no longer point at a live path/host. The
+        # Sentinel page keeps the history, but the action queue and KPI must
+        # not ask the operator to investigate a machine that is gone.
+        active = _active_ips_sync()
+        live_ids = _live_path_ids_sync()
+        for alert in alerts:
+            alert['src_active'] = alert.get('src_ip') in active
+            alert['dst_active'] = alert.get('dst_ip') in active
+            alert['actionable'] = alert_is_actionable(alert, active, live_ids)
         return jsonify({'data': alerts, 'count': len(alerts)})
     except Exception as e:
         return _internal_error(e)

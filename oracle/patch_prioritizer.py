@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from chronicle import db
+from chronicle.live_state import live_attack_paths
 
 
 async def generate_patch_priority() -> dict[str, Any]:
@@ -24,21 +25,29 @@ async def generate_patch_priority() -> dict[str, Any]:
     """
     cves_with_context = await db.fetch_all("""
         SELECT 
-            h.ip, h.risk_score, h.asset_value,
+            h.id AS host_id, h.ip, h.risk_score, h.asset_value,
             c.cve_id, c.cvss_v3, c.severity, c.description,
             p.port, p.service,
-            pc.exploit_status, pc.effective_cvss,
-            (SELECT COUNT(*) FROM attack_paths WHERE (entry_host_id = h.id OR target_host_id = h.id) AND is_active=1) as path_count
+            pc.exploit_status, pc.effective_cvss
         FROM cves c
         JOIN port_cves pc ON pc.cve_id = c.id
         JOIN ports p ON p.id = pc.port_id
         JOIN hosts h ON h.id = p.host_id
         WHERE h.is_active=1
+          AND p.state='open'
           AND COALESCE(pc.dismissed,0)=0
           AND COALESCE(pc.verified_status,'') != 'NOT_AFFECTED'
           AND (c.cvss_v3 IS NOT NULL OR c.severity != 'NONE')
         ORDER BY c.cvss_v3 DESC
     """)
+
+    # Only paths that still exist make a host "on a kill chain"; counting an
+    # active row that mentions an offline host inflated every patch score.
+    paths_by_host: dict[int, int] = {}
+    for path in await live_attack_paths():
+        for host_id in {path["entry_host_id"], path["target_host_id"]}:
+            if host_id is not None:
+                paths_by_host[host_id] = paths_by_host.get(host_id, 0) + 1
     
     if not cves_with_context:
         return {
@@ -63,7 +72,7 @@ async def generate_patch_priority() -> dict[str, Any]:
         
         cvss = row['effective_cvss'] or row['cvss_v3'] or 0
         asset_val = row['asset_value'] or 5
-        path_count = row['path_count'] or 0
+        path_count = paths_by_host.get(row['host_id'], 0)
         risk_score = row['risk_score'] or 0
         
         network_risk_score = (

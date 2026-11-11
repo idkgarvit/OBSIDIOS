@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 from chronicle import db
+from chronicle.live_state import count_live_attack_paths
 
 # verification: scan | partial | policy
 FRAMEWORK_MAPPINGS = {
@@ -187,12 +188,12 @@ async def map_compliance(framework: str = 'PCI-DSS') -> dict[str, Any]:
     # Only findings that still apply count: a dismissed or NOT_AFFECTED CVE on
     # a retired host must not keep a requirement NON-COMPLIANT forever.
     cves = await db.fetch_all(
-        """SELECT c.severity, COUNT(*) as cnt
+        """SELECT c.severity, COUNT(DISTINCT pc.cve_id) as cnt
            FROM cves c
            JOIN port_cves pc ON pc.cve_id = c.id
            JOIN ports p ON p.id = pc.port_id
            JOIN hosts h ON h.id = p.host_id
-           WHERE h.is_active=1
+           WHERE h.is_active=1 AND p.state='open'
              AND COALESCE(pc.dismissed, 0) = 0
              AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'
            GROUP BY c.severity"""
@@ -202,7 +203,7 @@ async def map_compliance(framework: str = 'PCI-DSS') -> dict[str, Any]:
         """SELECT COUNT(*) FROM ports p JOIN hosts h ON h.id = p.host_id
            WHERE p.state='open' AND h.is_active=1"""
     ) or 0
-    attack_paths = await db.fetch_val("SELECT COUNT(*) FROM attack_paths WHERE is_active=1") or 0
+    attack_paths = await count_live_attack_paths()
 
     for req_id, req_info in mapping.items():
         finding_types = req_info['findings']

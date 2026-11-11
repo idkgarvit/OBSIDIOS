@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from chronicle import db
+from chronicle.live_state import count_actionable_alerts, count_live_attack_paths
 
 
 async def calculate_posture_score() -> dict[str, Any]:
@@ -57,7 +58,8 @@ async def calculate_posture_score() -> dict[str, Any]:
         """SELECT COUNT(*) FROM port_cves pc
            JOIN ports p ON p.id = pc.port_id
            JOIN hosts h ON h.id = p.host_id
-           WHERE h.is_active=1 AND COALESCE(pc.dismissed, 0)=0
+           WHERE h.is_active=1 AND p.state='open' AND COALESCE(pc.dismissed, 0)=0
+             AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'
              AND pc.exploit_status IN ('CONFIRMED_EXPLOITABLE','VERIFIED')""",
         default=0,
     )
@@ -104,7 +106,8 @@ async def _calculate_patch_score() -> dict:
               JOIN ports p ON p.id = pc.port_id
               JOIN hosts h ON h.id = p.host_id
               JOIN cves c  ON c.id = pc.cve_id
-              WHERE h.is_active=1 AND COALESCE(pc.dismissed, 0)=0
+              WHERE h.is_active=1 AND p.state='open'
+                AND COALESCE(pc.dismissed, 0)=0
                 AND COALESCE(pc.verified_status, '') != 'NOT_AFFECTED'"""
     total_cves = await db.fetch_val(f"SELECT COUNT(*) {base}", default=0) or 0
     critical_cves = await db.fetch_val(f"SELECT COUNT(*) {base} AND c.severity='CRITICAL'", default=0) or 0
@@ -126,9 +129,9 @@ async def _calculate_patch_score() -> dict:
 
 
 async def _calculate_attack_path_score() -> dict:
-    """Calculate attack path exposure score."""
-    total_paths = await db.fetch_val('SELECT COUNT(*) FROM attack_paths WHERE is_active=1')
-    active_alerts = await db.fetch_val('SELECT COUNT(*) FROM sentinel_alerts WHERE acknowledged=0')
+    """Calculate attack path exposure score from paths that still exist."""
+    total_paths = await count_live_attack_paths()
+    active_alerts = await count_actionable_alerts()
     shield_blocks = await db.fetch_val('SELECT COUNT(*) FROM shield_actions WHERE is_active=1')
     
     if total_paths == 0:
@@ -150,14 +153,16 @@ async def _calculate_attack_path_score() -> dict:
 
 
 async def _calculate_anomaly_score() -> dict:
-    """Calculate behavioral anomaly score."""
-    total_anomalies = await db.fetch_val('SELECT COUNT(*) FROM anomalies WHERE acknowledged=0')
+    """Calculate behavioral anomaly score for hosts still on the network."""
+    live = ("FROM anomalies a JOIN hosts h ON h.id = a.host_id "
+            "WHERE a.acknowledged=0 AND h.is_active=1")
+    total_anomalies = await db.fetch_val(f"SELECT COUNT(*) {live}")
     recent_anomalies = await db.fetch_val(
-        "SELECT COUNT(*) FROM anomalies WHERE acknowledged=0 AND detected_at > ?",
+        f"SELECT COUNT(*) {live} AND a.detected_at > ?",
         (time.time() - 86400,)
     )
     critical_anomalies = await db.fetch_val(
-        "SELECT COUNT(*) FROM anomalies WHERE acknowledged=0 AND confidence > 0.7"
+        f"SELECT COUNT(*) {live} AND a.confidence > 0.7"
     )
     
     if total_anomalies == 0:

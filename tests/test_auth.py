@@ -215,6 +215,10 @@ class TestOperationalContext:
 
         monkeypatch.setattr("dashboard.app.db.fetch_val", fake_fetch_val)
         monkeypatch.setattr(
+            "dashboard.app._actionable_unacked_alerts_sync",
+            lambda: [{}, {}, {}, {}],
+        )
+        monkeypatch.setattr(
             "dashboard.app.db.fetch_one",
             lambda *a, **k: {
                 "scan_type": "NMAP", "started_at": 1.0,

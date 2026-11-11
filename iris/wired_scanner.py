@@ -26,6 +26,7 @@ import nmap
 from loguru import logger
 
 from chronicle import db
+from chronicle.live_state import retire_stale_attack_paths
 from chronicle.models import Host, Port, ScanResult
 from config.settings import scan as scan_cfg
 from config.settings import validate_nmap_arguments, validate_target_cidr
@@ -445,7 +446,13 @@ def _offline_grace_seconds() -> float:
 
 
 async def _mark_missing_hosts_offline(seen_ips: list[str], grace: float | None = None) -> int:
-    """Mark hosts unseen beyond the grace window offline (records when)."""
+    """Mark hosts unseen beyond the grace window offline (records when).
+
+    Retiring the host is not enough: attack paths, predicted alerts and CVE
+    mappings are separate rows. Paths that mention a host that just vanished
+    are retired here, so the action queue does not keep recommending a pivot
+    through a machine that is no longer on the network.
+    """
     if not seen_ips:
         return 0
     grace = _offline_grace_seconds() if grace is None else grace
@@ -458,14 +465,17 @@ async def _mark_missing_hosts_offline(seen_ips: list[str], grace: float | None =
             "AND last_seen < ? AND ip NOT IN (SELECT value FROM json_each(?))",
             (cutoff, seen_json), default=0,
         )
-        if not count:
-            return 0
-        await db.execute(
-            "UPDATE hosts SET is_active=0, offline_since=? "
-            "WHERE is_active=1 AND last_seen < ? "
-            "AND ip NOT IN (SELECT value FROM json_each(?))",
-            (time.time(), cutoff, seen_json),
-        )
+        if count:
+            await db.execute(
+                "UPDATE hosts SET is_active=0, offline_since=? "
+                "WHERE is_active=1 AND last_seen < ? "
+                "AND ip NOT IN (SELECT value FROM json_each(?))",
+                (time.time(), cutoff, seen_json),
+            )
+        # Run even when this sweep retired nothing: an older database can
+        # already contain paths anchored on hosts that went offline before
+        # this check existed.
+        await retire_stale_attack_paths()
         return int(count)
     except Exception as exc:
         logger.warning(f"[IRIS] Could not update host offline state: {exc}")
@@ -859,7 +869,7 @@ async def run_scan(network: str | None = None) -> ScanResult:
                 logger.warning(f"[IRIS] Scan {scan_id} was cancelled — skipping DONE update")
                 await _notify_safe(title="⛔ **Scan Cancelled**", message=f"Scan **#{scan_id}** was cancelled mid-execution", color="medium", footer="OBSIDIOS v2.0")
             else:
-                await db.execute("UPDATE scans SET finished_at=?, hosts_found=?, ports_found=?, status='DONE' WHERE id=?", (time.time(), len(res.hosts), ports_found, scan_id))
+                await db.execute("UPDATE scans SET finished_at=?, hosts_found=?, ports_found=?, status='DONE' WHERE id=?", (time.time(), len(set(ips)), ports_found, scan_id))
     except Exception as e:
         logger.exception(f"[IRIS] Scan failed: {e}")
         # Callers (CLI trigger, scheduled task, scan_cycle) can only tell a

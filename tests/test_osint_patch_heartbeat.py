@@ -177,6 +177,7 @@ class TestOsintDedupe:
 class TestPatchPriority:
     def _row(self, **overrides):
         row = {
+            "host_id": 1,
             "ip": "10.44.0.5", "risk_score": 5.0, "asset_value": 8.0,
             "cve_id": "CVE-2024-0001", "cvss_v3": 9.8, "severity": "CRITICAL",
             "description": "", "port": 443, "service": "https",
@@ -188,7 +189,7 @@ class TestPatchPriority:
     def test_same_cve_on_two_hosts_yields_two_patch_items(self, monkeypatch):
         rows = [
             self._row(),
-            self._row(ip="10.44.0.6", port=8443, asset_value=10.0),
+            self._row(host_id=2, ip="10.44.0.6", port=8443, asset_value=10.0),
         ]
         monkeypatch.setattr(pp, "db", FakeDB(rows=rows))
         result = asyncio.run(pp.generate_patch_priority())

@@ -44,7 +44,8 @@ async def rebuild_graph() -> nx.DiGraph:
         cves = await db.fetch_all(
             "SELECT pc.port_id,p.host_id,c.cve_id,c.cvss_v3,c.severity,pc.exploit_status,pc.effective_cvss "
             "FROM port_cves pc JOIN ports p ON p.id=pc.port_id JOIN cves c ON c.id=pc.cve_id "
-            "WHERE pc.verified_status IS NULL OR pc.verified_status != 'NOT_AFFECTED'")
+            "WHERE p.state='open' AND COALESCE(pc.dismissed,0)=0 "
+            "AND (pc.verified_status IS NULL OR pc.verified_status != 'NOT_AFFECTED')")
         for cv in cves:
             hid = cv["host_id"]
             if hid in g.nodes:

@@ -1126,7 +1126,8 @@ async function loadRemediation() {
       const riskColor = risk > 7 ? 'var(--red)' : risk > 4 ? 'var(--amber)' : 'var(--green)';
       const riskBar = Math.max(0, Math.min(100, (risk/10)*100));
       const exploitable = !!p.exploitable;
-      return '<tr><td><span class="pri-badge '+pri+'">P'+(idx+1)+'</span></td><td class="td-mono">'+esc(p.cve_id)+'</td><td class="td-mono">'+esc(p.ip||'')+'</td><td><div style="display:flex;align-items:center;gap:7px"><div style="width:50px;height:3px;background:var(--b0);border-radius:2px;overflow:hidden"><div style="width:'+riskBar+'%;height:100%;background:'+riskColor+'"></div></div><span style="font-family:var(--mono);font-size:9px;color:'+riskColor+'">'+esc(risk)+'</span></div></td><td>'+(exploitable?'<span class="exploit-yes">YES</span>':'<span class="exploit-no">NO</span>')+'</td><td style="font-size:10px;color:var(--t2)">'+(Number(p.attack_paths) > 0 ? 'Critical Patch' : 'Standard')+'</td></tr>';
+      const target = (p.ip || '') + (p.port ? ':' + p.port : '');
+      return '<tr><td><span class="pri-badge '+pri+'">P'+(idx+1)+'</span></td><td class="td-mono">'+esc(p.cve_id)+'</td><td class="td-mono">'+esc(target)+'</td><td><div style="display:flex;align-items:center;gap:7px"><div style="width:50px;height:3px;background:var(--b0);border-radius:2px;overflow:hidden"><div style="width:'+riskBar+'%;height:100%;background:'+riskColor+'"></div></div><span style="font-family:var(--mono);font-size:9px;color:'+riskColor+'">'+esc(risk)+'</span></div></td><td>'+(exploitable?'<span class="exploit-yes">YES</span>':'<span class="exploit-no">NO</span>')+'</td><td style="font-size:10px;color:var(--t2)">'+(Number(p.attack_paths) > 0 ? 'Critical Patch' : 'Standard')+'</td></tr>';
     }).join('');
   } catch(e) {
     if (e.name !== 'AbortError') console.error('Remediation:', e);
@@ -1201,7 +1202,7 @@ async function loadServices() {
     }
     tbody.innerHTML = services.map(s => {
       const open = s.state === 'open';
-      return '<tr style="cursor:pointer" data-action="openHost" data-ip="'+esc(s.ip||'')+'" title="Open host details"><td><span style="font-family:var(--mono);color:var(--blue)">'+esc(s.port)+'/'+esc(s.protocol||'tcp')+'</span></td><td class="td-primary">'+esc((s.service||'unknown').toUpperCase())+'</td><td class="td-mono">'+esc(s.ip)+'</td><td class="td-dim">'+esc(s.version||'—')+'</td><td><span class="svc-state svc-'+(open?'open':'filtered')+'">'+(open?'OPEN':'FILTERED')+'</span></td><td class="td-dim">'+esc(s.state||'—')+'</td></tr>';
+      return '<tr style="cursor:pointer" data-action="openHost" data-ip="'+esc(s.ip||'')+'" title="Open host details"><td><span style="font-family:var(--mono);color:var(--blue)">'+esc(s.port)+'/'+esc(s.protocol||'tcp')+'</span></td><td class="td-primary">'+esc((s.service||'unknown').toUpperCase())+'</td><td class="td-mono">'+esc(s.ip)+'</td><td class="td-dim">'+esc(s.version||'—')+'</td><td><span class="svc-state svc-'+(open?'open':'filtered')+'">'+(open?'OPEN':'FILTERED')+'</span></td><td class="td-dim">'+esc(s.risk_score!=null?Math.round(s.risk_score):'—')+'</td></tr>';
     }).join('');
   } catch(e) {
     if (e.name !== 'AbortError') console.error('Services:', e);
@@ -1439,8 +1440,11 @@ async function loadForge() {
     const d = await res.json();
     const rules = d.data || [];
     renderForgeDelivery(d.delivery);
-    document.getElementById('forge-total').textContent = rules.length;
-    document.getElementById('forge-sib').textContent = rules.length; pulseSib('forge-sib');
+    // The table is a rule library; the badge and header only count rules that
+    // are actually enforced. Retired-path rules stay visible but excluded.
+    const activeRules = rules.filter(r => r.is_active).length;
+    document.getElementById('forge-total').textContent = rules.length + ' rules · ' + activeRules + ' active';
+    document.getElementById('forge-sib').textContent = activeRules; pulseSib('forge-sib');
     if(rules.length===0) { tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--t3);padding:16px">No rules generated yet. Run a scan + attack simulation first.</td></tr>'; return; }
     let rows = '';
     rules.forEach(r => {
@@ -1574,14 +1578,17 @@ function renderSentinelAlerts() {
   if(!tbody) return;
   const filter = document.getElementById('sentinel-filter')?.value || 'all';
   const alerts = sentinelData.filter(a => {
-    if (filter === 'unacked') return !a.acknowledged;
+    if (filter === 'unacked') return !a.acknowledged && alertActionable(a);
     if (filter === 'predicted') return !!a.predicted;
     return true;
   });
-  const unacked = sentinelData.filter(a => !a.acknowledged).length;
+  const unacked = actionableUnacked().length;
+  const activePred = livePredicted().length;
   setText('sentinel-total', sentinelData.length);
-  setText('sentinel-predicted', sentinelData.filter(a => a.predicted).length);
+  setText('sentinel-predicted', activePred);
   setText('sentinel-unacked', unacked);
+  const predEl = document.getElementById('sentinel-predicted');
+  if (predEl) predEl.title = 'Predicted paths whose hosts are still live (acknowledged or not)';
   const sib = document.getElementById('sentinel-sib');
   if (sib) { sib.textContent = unacked; pulseSib('sentinel-sib'); }
   if(!sentinelData.length) {
@@ -1599,7 +1606,9 @@ function renderSentinelAlerts() {
     const sevLabel = sevNum<=1?'CRITICAL':sevNum<=2?'HIGH':'INFO';
     const sevCls = sevNum<=1?'badge-critical':sevNum<=2?'badge-high':'badge-blue';
     const predictedBadge = a.predicted
-      ? '<span class="badge badge-critical" title="PHANTOM predicted this attack path">PREDICTED</span>'
+      ? (a.actionable === false
+          ? '<span class="badge badge-low" title="Path or endpoint no longer live — kept for history">STALE</span>'
+          : '<span class="badge badge-critical" title="PHANTOM predicted this attack path">PREDICTED</span>')
       : '<span class="badge badge-medium" title="Unexpected alert">NEW</span>';
     const msg = (a.message||'').substring(0, 80);
     let ackCell;
@@ -2114,7 +2123,7 @@ async function updateStats() {
     document.getElementById('rp-engine').textContent = engine;
     document.getElementById('status-txt').textContent = d.is_scanning ? 'Scanning' : 'Nominal';
     document.getElementById('scan-txt').textContent = engine;
-    document.getElementById('alert-txt').textContent = (d.alerts||cves) + ' Alerts';
+    document.getElementById('alert-txt').textContent = Number(d.alerts || 0) + ' Alerts';
 
     const wasScanning = scanning;
     isScannerEnabled = d.scanner_enabled;
@@ -2279,10 +2288,41 @@ function findHostMeta(ip) {
   return (hostData || []).find(h => h.ip === ip) || null;
 }
 
+// The API marks predictions whose path or endpoints no longer exist as
+// non-actionable. Older payloads omit the flag, so only an explicit false
+// removes an alert from the current-work views.
+function alertActionable(a) {
+  return !a || a.actionable !== false;
+}
+
+function activePredicted() {
+  return (sentinelData || []).filter(a => a.predicted && !a.acknowledged && alertActionable(a));
+}
+
+function livePredicted() {
+  // Acking a prediction does not make its path disappear, so the Sentinel
+  // header counts every still-reachable prediction, acked or not.
+  return (sentinelData || []).filter(a => a.predicted && alertActionable(a));
+}
+
+function actionableUnacked() {
+  return (sentinelData || []).filter(a => !a.acknowledged && alertActionable(a));
+}
+
+function distinctCveIds(list) {
+  const seen = new Set();
+  return (list || []).filter(c => {
+    const key = c.cve_id || ('row:' + c.id);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function renderActionQueue() {
   const body = document.getElementById('queue-body');
   if (!body) return;
-  const predicted = (sentinelData || []).filter(a => a.predicted);
+  const predicted = activePredicted();
   const criticalCves = (cveData || []).filter(c => String(c.severity || '').toUpperCase() === 'CRITICAL');
   const highCves = (cveData || []).filter(c => String(c.severity || '').toUpperCase() === 'HIGH');
   const medCves = (cveData || []).filter(c => String(c.severity || '').toUpperCase() === 'MEDIUM');
@@ -2367,8 +2407,8 @@ function renderActionQueue() {
 function renderBrief() {
   const body = document.getElementById('brief-body');
   if (!body) return;
-  const predicted = (sentinelData || []).filter(a => a.predicted);
-  const unacked = (sentinelData || []).filter(a => !a.acknowledged);
+  const predicted = activePredicted();
+  const unacked = actionableUnacked();
   const items = [];
 
   const byHost = {};
@@ -2379,7 +2419,7 @@ function renderBrief() {
     items.push({
       dot: 'var(--red)',
       html: '<b>Risk is concentrated.</b> ' + esc(top[0]) + ' holds ' + top[1] + ' of '
-        + (cveData || []).length + ' CVEs'
+        + (cveData || []).length + ' findings'
         + (inbound ? ' and is the target of ' + inbound + ' predicted pivot' + (inbound === 1 ? '' : 's') : '')
         + '.',
     });
@@ -2399,11 +2439,13 @@ function renderBrief() {
   if (unacked.length) {
     items.push({
       dot: 'var(--accent)',
-      html: '<b>' + unacked.length + ' unacknowledged alert' + (unacked.length === 1 ? '' : 's') + '.</b> '
-        + predicted.length + ' predicted path' + (predicted.length === 1 ? '' : 's') + ' require review.',
+      html: '<b>' + unacked.length + ' unacknowledged alert' + (unacked.length === 1 ? '' : 's') + '.</b>'
+        + (predicted.length
+          ? ' ' + predicted.length + ' predicted path' + (predicted.length === 1 ? '' : 's') + ' require review.'
+          : ' No predicted paths are still reachable.'),
     });
   } else {
-    items.push({ dot: 'var(--green)', html: '<b>Alert queue is clear.</b> No unacknowledged Sentinel alerts.' });
+    items.push({ dot: 'var(--green)', html: '<b>Alert queue is clear.</b> No actionable unacknowledged Sentinel alerts.' });
   }
 
   body.innerHTML = items.slice(0, 3).map(i =>
@@ -2474,22 +2516,28 @@ function renderSelectedAsset() {
 }
 
 function renderOverview() {
-  const predicted = (sentinelData || []).filter(a => a.predicted);
-  const unacked = (sentinelData || []).filter(a => !a.acknowledged);
+  const predicted = activePredicted();
+  const unacked = actionableUnacked();
   const critical = (cveData || []).filter(c => String(c.severity || '').toUpperCase() === 'CRITICAL');
   const high = (cveData || []).filter(c => String(c.severity || '').toUpperCase() === 'HIGH');
+  // A CVE affecting two hosts is one vulnerability but two findings. The KPI
+  // counts unique CVEs; the findings table counts affected host/port rows.
+  const criticalIds = distinctCveIds(critical).length;
+  const statsCritical = lastStats && Number.isFinite(Number(lastStats.critical_cves))
+    ? Number(lastStats.critical_cves)
+    : criticalIds;
   const assets = lastStats && Number.isFinite(Number(lastStats.hosts))
     ? Number(lastStats.hosts)
     : nodeDataByIndex.size;
 
   setText('ov-assets', assets || 0);
   setText('ov-predicted', predicted.length);
-  setText('kpi-critical', critical.length + predicted.length);
-  setText('kpi-foot-critical', critical.length + ' CVE' + (critical.length === 1 ? '' : 's')
+  setText('kpi-critical', statsCritical + predicted.length);
+  setText('kpi-foot-critical', statsCritical + ' CVE' + (statsCritical === 1 ? '' : 's')
     + ' · ' + predicted.length + ' predicted');
-  setText('kpi-foot-alerts', (sentinelData || []).length + ' total · ' + predicted.length + ' predicted');
+  setText('kpi-foot-alerts', (sentinelData || []).length + ' total · ' + unacked.length + ' actionable');
   if (sentinelLoaded) setText('ctx-unack', unacked.length);
-  if (lastStats) setText('kpi-foot-assets', (lastStats.online || 0) + ' online · ' + (lastStats.offline || 0) + ' offline');
+  if (lastStats) setText('kpi-foot-assets', (lastStats.online || 0) + ' live · ' + (lastStats.offline || 0) + ' offline');
   if (lastContext) {
     const dry = !!lastContext.shield_dry_run;
     const shieldFoot = document.getElementById('kpi-foot-shield');
@@ -2649,6 +2697,11 @@ function initDashboard() {
   loadCVEs();
   loadHosts();
   loadSentinelAlerts();
+  // These three feed sidebar badges; leaving them lazy made the rail show
+  // 0 until the operator opened the page, which read as "nothing to fix".
+  loadForge();
+  loadAttackVectors();
+  loadRemediation();
   tickSession();
   safeInterval(tickSession, 1000, 'global');
   safeInterval(loadContext, 30000, 'global');

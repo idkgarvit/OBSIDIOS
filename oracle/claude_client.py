@@ -27,6 +27,7 @@ from urllib.parse import quote
 from loguru import logger
 
 from chronicle import db
+from chronicle.live_state import live_attack_paths
 from config.settings import ai as ai_cfg
 
 # ── Result cache (avoid redundant AI calls on every page load) ──────────────
@@ -278,6 +279,7 @@ async def _load_network_context() -> dict[str, Any]:
            JOIN ports p      ON p.id = pc.port_id
            JOIN hosts h      ON h.id = p.host_id
            WHERE h.is_active=1
+             AND p.state='open'
              AND COALESCE(pc.dismissed,0)=0
              AND COALESCE(pc.verified_status,'') != 'NOT_AFFECTED'
              AND h.id IN (
@@ -296,26 +298,19 @@ async def _load_network_context() -> dict[str, Any]:
                JOIN ports p      ON p.id = pc.port_id
                JOIN hosts h      ON h.id = p.host_id
                WHERE h.is_active=1
+                 AND p.state='open'
                  AND COALESCE(pc.dismissed,0)=0
                  AND COALESCE(pc.verified_status,'') != 'NOT_AFFECTED')""",
         default=0,
     ) or 0
-    # Only show paths from the most recent simulation (avoid accumulation)
-    latest_sim_time = await db.fetch_val(
-        "SELECT MAX(simulated_at) FROM attack_paths WHERE is_active=1"
-    )
-    paths = await db.fetch_all(
-        """SELECT id, entry_host_id, target_host_id, path_json,
-                  total_steps, attacker_roi, estimated_time_minutes
-           FROM attack_paths WHERE is_active=1
-           AND simulated_at >= ?
-           ORDER BY attacker_roi DESC
-           LIMIT ?""",
-        (latest_sim_time - 60 if latest_sim_time else 0, _MAX_CONTEXT_PATHS)
-    )
+    # Only paths whose every hop is still an active host. Historical rows stay
+    # in SQLite, but the AI context must not describe a vanished machine.
+    paths = (await live_attack_paths())[:_MAX_CONTEXT_PATHS]
     rules = await db.fetch_all(
         """SELECT DISTINCT rule_sid, rule_category, mitre_technique, rule_text
            FROM forge_rules WHERE is_active=1
+           AND (attack_path_id IS NULL OR attack_path_id IN
+                (SELECT id FROM attack_paths WHERE is_active=1))
            ORDER BY rule_category, rule_sid
            LIMIT ?""",
         (_MAX_CONTEXT_RULES,),

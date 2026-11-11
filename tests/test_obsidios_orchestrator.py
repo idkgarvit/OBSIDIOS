@@ -578,12 +578,15 @@ def test_status_counts_unacknowledged_alerts(monkeypatch):
         return None
 
     async def fake_fetch_val(sql, *_args, **_kwargs):
-        if "sentinel_alerts" in sql:
-            seen.append(sql)
-            return 7
         return 0
 
-    async def fake_fetch_all(*_args, **_kwargs):
+    async def fake_fetch_all(sql, *_args, **_kwargs):
+        if "sentinel_alerts" in sql:
+            seen.append(sql)
+            # Real (non-predicted) alerts remain actionable until acked, so
+            # the HUD must show them even when their hosts are now offline.
+            return [{"id": i, "predicted": 0, "acknowledged": 0}
+                    for i in range(7)]
         return []
 
     from oracle import posture_score

@@ -98,6 +98,15 @@ class TestContextLoading:
                 return [{"ip": "10.0.0.5", "cve_id": "CVE-2024-0001",
                          "cvss_v3": 9.8, "severity": "CRITICAL",
                          "description": "boom"}]
+            if "FROM forge_rules" in sql:
+                return [
+                    {"rule_sid": 1, "rule_category": None,
+                     "mitre_technique": "T1", "rule_text": "alert"},
+                    {"rule_sid": 2, "rule_category": "  ",
+                     "mitre_technique": "T2", "rule_text": "alert"},
+                    {"rule_sid": 3, "rule_category": " RECON ",
+                     "mitre_technique": "T3", "rule_text": "alert"},
+                ]
             if "FROM attack_paths" in sql:
                 return [
                     {"id": 1, "entry_host_id": 1, "target_host_id": 2,
@@ -107,15 +116,6 @@ class TestContextLoading:
                     {"id": 2, "entry_host_id": 1, "target_host_id": 2,
                      "path_json": "[1, 2, 3]", "total_steps": 0,
                      "attacker_roi": 1.0, "estimated_time_minutes": 1},
-                ]
-            if "FROM forge_rules" in sql:
-                return [
-                    {"rule_sid": 1, "rule_category": None,
-                     "mitre_technique": "T1", "rule_text": "alert"},
-                    {"rule_sid": 2, "rule_category": "  ",
-                     "mitre_technique": "T2", "rule_text": "alert"},
-                    {"rule_sid": 3, "rule_category": " RECON ",
-                     "mitre_technique": "T3", "rule_text": "alert"},
                 ]
             return []
 
@@ -130,6 +130,9 @@ class TestContextLoading:
     def test_limits_are_parameters_not_string_interpolation(self, monkeypatch):
         fake = self.FakeDB()
         monkeypatch.setattr(claude_client, "db", fake)
+        # live_attack_paths reads through its own module handle.
+        from chronicle import live_state
+        monkeypatch.setattr(live_state, "db", fake)
 
         context = asyncio.run(claude_client._load_network_context())
 
@@ -149,7 +152,7 @@ class TestContextLoading:
 
         path_params = next(p for sql, p in fake.queries
                            if "ORDER BY attacker_roi" in sql)
-        assert path_params == (940.0, claude_client._MAX_CONTEXT_PATHS)
+        assert path_params == ()
 
         # A COUNT query keeps the headline honest even when rows are truncated.
         assert context["total_cves"] == 42
@@ -199,13 +202,17 @@ class TestContextLoading:
         assert run_async(scenario()) == {active_id}
 
     def test_non_dict_path_steps_are_dropped_not_propagated(self, monkeypatch):
-        monkeypatch.setattr(claude_client, "db", self.FakeDB())
+        fake = self.FakeDB()
+        monkeypatch.setattr(claude_client, "db", fake)
+        from chronicle import live_state
+        monkeypatch.setattr(live_state, "db", fake)
 
         context = asyncio.run(claude_client._load_network_context())
 
+        # Malformed path JSON is no longer a live route: it is filtered before
+        # it reaches the model instead of being normalized into an empty path.
         assert [p["steps"] for p in context["attack_paths"]] == [
             [{"ip": "10.0.0.5", "technique": "ssh"}],
-            [],
         ]
         assert context["hosts"][0]["ports"] == ["22/tcp (ssh )"]
 

@@ -226,9 +226,14 @@ async def scan_cycle() -> None:
 
             await execute("INSERT OR REPLACE INTO system_settings(key,value) VALUES('scan_phase','CVE mapping...')")
 
+            mapped_cves = 0
             if scan_result.hosts:
                 cve_map, aff_map = await map_cves_for_scan(scan_result)
                 await persist_cves(cve_map, scan_result, aff_map)
+                # Count the mappings this cycle actually produced. The old
+                # update replaced this with the global `cves` cache size, so
+                # scan history grew every time an unrelated CVE was fetched.
+                mapped_cves = sum(len(v) for v in cve_map.values())
 
             # Cross-reference CVEs with known exploits (Exploit-DB / MSF)
             from iris.exploit_validator import validate_exploits
@@ -294,13 +299,14 @@ async def scan_cycle() -> None:
                         color="medium",
                     )
 
-            # Update scan record with final counts after all phases
+            # Record what this cycle mapped. Host and port counts were already
+            # written by run_scan() from the sweep itself; replacing them with
+            # global table totals turned history into a running total of every
+            # host ever seen.
             from chronicle.db import execute
             await execute(
-                "UPDATE scans SET hosts_found=(SELECT COUNT(*) FROM hosts), "
-                "ports_found=(SELECT COUNT(*) FROM ports), "
-                "cves_found=(SELECT COUNT(*) FROM cves) WHERE id=?",
-                (scan_result.scan_id,)
+                "UPDATE scans SET cves_found=? WHERE id=?",
+                (mapped_cves, scan_result.scan_id)
             )
             if scan_result.errors:
                 logger.warning(
@@ -720,7 +726,10 @@ async def _scan_pipeline(target: str, display=None):
                     logger.warning(f"[IRIS] Skipping malformed port for {ip}: {exc}")
             if port_objs:
                 scan_result.ports[ip] = port_objs
-        hosts_found = len(scan_result.hosts)
+        hosts_found = len({
+            h["ip"] for h in arp_hosts
+            if isinstance(h, dict) and isinstance(h.get("ip"), str) and h["ip"].strip()
+        })
         ports_found = sum(len(v) for v in scan_result.ports.values())
         if display:
             display.start_cve_lookup(ports_found)
@@ -883,13 +892,13 @@ def status():
             res = await calculate_posture_score()
             posture = res.get('overall_score', 0)
 
-            # Stats
+            # Stats. The terminal HUD must agree with the dashboard: a CVE on
+            # a retired host or a prediction for a gone path is history.
+            from chronicle import live_state
             hosts = await db.fetch_val('SELECT COUNT(*) FROM hosts WHERE is_active=1')
-            cves = await db.fetch_val('SELECT COUNT(*) FROM cves')
+            cves = await live_state.count_live_cves()
             blocks = await db.fetch_val('SELECT COUNT(*) FROM shield_actions WHERE is_active=1')
-            alerts = await db.fetch_val(
-                'SELECT COUNT(*) FROM sentinel_alerts WHERE acknowledged=0', default=0
-            )
+            alerts = await live_state.count_actionable_alerts()
 
             console.print(Panel(Text("STRATEGIC HUB STATUS: ONLINE", justify="center", style="bold green"), border_style="green"))
 
