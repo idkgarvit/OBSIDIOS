@@ -36,6 +36,7 @@ _MAC_VENDORS: dict[str, str] = {
     "18:FE:34": "Espressif",
     "00:0C:42": "Netgear",
     "D8:1C:79": "Netgear",
+    "14:33:75": "Zyxel",
     "A0:04:60": "Asus",
     "B0:6A:52": "Asus",
     "10:BF:48": "Asus",

@@ -470,6 +470,32 @@ class TestUpsertHosts:
         assert ids == {}
         assert fake_db.inserts == []
 
+    def test_vendor_and_device_are_persisted(self, monkeypatch):
+        fake_db = RecordingDB()
+        monkeypatch.setattr(wired, "db", fake_db)
+
+        asyncio.run(wired._upsert_hosts(
+            [{"ip": "10.44.0.1", "mac": "14:33:75:aa:bb:cc"}],
+            [{"ip": "10.44.0.1", "hostname": "", "os": [],
+              "ports": [{"port": 80}, {"port": 443}]}],
+        ))
+
+        sql, params = fake_db.inserts[0]
+        assert "vendor" in sql and "device" in sql
+        assert params[6] == "Zyxel"
+        assert params[7] == "ROUTER"
+
+    def test_hostname_classifies_the_device(self, monkeypatch):
+        fake_db = RecordingDB()
+        monkeypatch.setattr(wired, "db", fake_db)
+
+        asyncio.run(wired._upsert_hosts(
+            [],
+            [{"ip": "10.44.0.9", "hostname": "Galaxy-M02s", "os": []}],
+        ))
+
+        assert fake_db.inserts[0][1][7] == "PHONE"
+
 
 class ScanDB:
     def __init__(self):

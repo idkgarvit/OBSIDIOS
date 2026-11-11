@@ -29,14 +29,24 @@ def _numeric(value: Any, default: float = 0.0) -> float:
         return default
     return number if math.isfinite(number) else default
 
+def _row_field(row, key: str, default=None):
+    """Read an optional column from a sqlite Row or a plain dict."""
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return default
+
+
 async def rebuild_graph() -> nx.DiGraph:
     async with _graph_lock:
         g = nx.DiGraph()
         hosts = await db.fetch_all("SELECT * FROM hosts WHERE is_active = 1")
         for h in hosts:
             g.add_node(h["id"], ip=h["ip"], mac=h["mac"], os_name=h["os_name"],
+                       hostname=_row_field(h, "hostname"),
+                       device=_row_field(h, "device"),
                        risk_score=h["risk_score"], asset_value=h["asset_value"],
-                       vendor=h["vendor"], ports=[], cves=[])
+                       vendor=_row_field(h, "vendor"), ports=[], cves=[])
         ports = await db.fetch_all("SELECT host_id,port,service,version,cpe FROM ports WHERE state='open'")
         for p in ports:
             if p["host_id"] in g.nodes:
@@ -149,6 +159,9 @@ def export_for_dashboard() -> dict:
     return {
         "nodes": [{"id":ip_by_id[nid],"ip":ip_by_id[nid],"risk":d.get("risk_score",0),
                    "os":d.get("os_name") or d.get("vendor") or "Unknown",
+                   "hostname":d.get("hostname") or "",
+                   "vendor":d.get("vendor") or "",
+                   "device":d.get("device") or "",
                    "asset":d.get("asset_value",5),"cve_count":len(d.get("cves") or []),
                    "port_count":len(d.get("ports") or [])} for nid,d in _graph.nodes(data=True)],
         "links": [{"source": ip_by_id[u], "target": ip_by_id[v]} for u, v in _graph.edges()],

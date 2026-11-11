@@ -659,7 +659,7 @@ class TestGraphEndpointResilience:
 
         def fake_all(sql, params=()):
             queries.append(sql)
-            if "SELECT ip, risk_score, os_name, vendor FROM hosts" in sql:
+            if "SELECT ip, risk_score, os_name, vendor, hostname, device FROM hosts" in sql:
                 return [{"ip": "10.0.0.5",
                          "risk_score": 10, "os_name": "Linux", "vendor": None}]
             return []
@@ -692,7 +692,7 @@ class TestGraphEndpointResilience:
             return default
 
         def fake_all(sql, params=()):
-            if "SELECT ip, risk_score, os_name, vendor FROM hosts" in sql:
+            if "SELECT ip, risk_score, os_name, vendor, hostname, device FROM hosts" in sql:
                 return [{"ip": "10.0.0.1", "risk_score": 9,
                          "os_name": "Linux", "vendor": None}]
             return []
@@ -719,7 +719,7 @@ class TestGraphEndpointResilience:
             return default
 
         def fake_all(sql, params=()):
-            if "SELECT ip, risk_score, os_name, vendor FROM hosts" in sql:
+            if "SELECT ip, risk_score, os_name, vendor, hostname, device FROM hosts" in sql:
                 return [
                     {"ip": "10.0.0.1", "risk_score": 5,
                      "os_name": "Linux", "vendor": None},
@@ -751,7 +751,7 @@ class TestGraphEndpointResilience:
         captured = {}
 
         def fake_all(sql, params=()):
-            if "SELECT ip, risk_score, os_name, vendor FROM hosts" in sql:
+            if "SELECT ip, risk_score, os_name, vendor, hostname, device FROM hosts" in sql:
                 return [{"ip": "10.0.0.1", "risk_score": 5,
                          "os_name": "Linux", "vendor": None}]
             if "FROM hosts h JOIN ports p" in sql:

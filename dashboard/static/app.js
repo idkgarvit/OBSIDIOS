@@ -1139,7 +1139,7 @@ async function loadRemediation() {
 /* ── HOST INVENTORY ── */
 function hostMatches(h, q) {
   if (!q) return true;
-  return [h.ip, h.hostname, h.os_name, h.mac, h.vendor]
+  return [h.ip, h.hostname, h.os_name, h.mac, h.vendor, h.device]
     .map(v => String(v === null || v === undefined ? '' : v).toLowerCase())
     .join(' ')
     .includes(q);
@@ -1163,7 +1163,9 @@ function renderHosts() {
     const riskColor = obsidiosRisk.color(risk);
     const online = true;
     const riskBar = obsidiosRisk.bar(risk);
-    return '<div class="hi-card" role="button" tabindex="0" data-action="openHost" data-ip="'+esc(h.ip||'')+'" aria-label="Open details for '+esc(h.ip||'host')+'"><div class="hi-top"><div style="width:7px;height:7px;border-radius:50%;background:'+(online?'var(--green)':'var(--red)')+';box-shadow:0 0 5px '+(online?'var(--green)':'var(--red)')+';flex-shrink:0"></div><div class="hi-ip">'+esc(h.ip||'')+'</div><div class="hi-os">'+esc(h.os_name||'Unknown')+'</div><div class="hi-risk" style="color:'+riskColor+'">Risk '+esc(risk)+'</div><span style="color:var(--t3);font-size:11px;margin-left:2px" aria-hidden="true">›</span></div><div class="hi-bar"><div class="hi-bar-fill" style="width:'+riskBar+'%;background:'+riskColor+'"></div></div><div class="hi-meta"><div class="hi-m">Hostname <span>'+esc(h.hostname||'—')+'</span></div><div class="hi-m">Vendor <span>'+esc(h.vendor||'—')+'</span></div><div class="hi-m">Asset Value <span>'+esc(h.asset_value||'—')+'</span></div><div class="hi-m">MAC <span>'+esc(h.mac||'—')+'</span></div></div></div>';
+    const dev = deviceLabel(h.device);
+    const identity = (dev && dev.toUpperCase() !== 'HOST') ? dev : (h.os_name || 'Unknown');
+    return '<div class="hi-card" role="button" tabindex="0" data-action="openHost" data-ip="'+esc(h.ip||'')+'" aria-label="Open details for '+esc(h.ip||'host')+'"><div class="hi-top"><div style="width:7px;height:7px;border-radius:50%;background:'+(online?'var(--green)':'var(--red)')+';box-shadow:0 0 5px '+(online?'var(--green)':'var(--red)')+';flex-shrink:0"></div><div class="hi-ip">'+esc(h.ip||'')+'</div><div class="hi-os">'+esc(identity)+'</div><div class="hi-risk" style="color:'+riskColor+'">Risk '+esc(risk)+'</div><span style="color:var(--t3);font-size:11px;margin-left:2px" aria-hidden="true">›</span></div><div class="hi-bar"><div class="hi-bar-fill" style="width:'+riskBar+'%;background:'+riskColor+'"></div></div><div class="hi-meta"><div class="hi-m">Hostname <span>'+esc(h.hostname||'—')+'</span></div><div class="hi-m">Vendor <span>'+esc(h.vendor||'—')+'</span></div><div class="hi-m">Asset Value <span>'+esc(h.asset_value||'—')+'</span></div><div class="hi-m">MAC <span>'+esc(h.mac||'—')+'</span></div></div></div>';
   }).join('');
 }
 
@@ -1840,14 +1842,29 @@ function fitTopologyCamera(force) {
   controls.update();
 }
 
+function deviceLabel(device) {
+  const d = String(device || '').trim();
+  if (!d) return '';
+  if (d.length <= 3) return d.toUpperCase();
+  return d.charAt(0).toUpperCase() + d.slice(1).toLowerCase();
+}
+
 function getShortName(node) {
-  let os = node.os || 'UNK';
-  if (os.toLowerCase().includes('linux')) os = 'LNX';
-  else if (os.toLowerCase().includes('windows')) os = 'WIN';
-  else if (os.toLowerCase().includes('darwin') || os.toLowerCase().includes('mac')) os = 'MAC';
-  else if (os.length > 5) os = os.substring(0, 4).toUpperCase();
+  const device = String(node.device || '').trim().toUpperCase();
+  const hostname = String(node.hostname || '').trim();
+  const os = String(node.os || '');
+  // Real identity first: device class, then the resolved name, then the OS.
+  let label = (device && device !== 'HOST') ? device : hostname;
+  if (!label) {
+    if (/windows/i.test(os)) label = 'WINDOWS';
+    else if (/darwin|mac ?os/i.test(os)) label = 'MACOS';
+    else if (/android/i.test(os)) label = 'ANDROID';
+    else if (/\bios\b/i.test(os)) label = 'IOS';
+    else label = os ? os.toUpperCase() : 'HOST';
+  }
+  if (label.length > 18) label = label.slice(0, 17) + '…';
   const parts = (node.id||node.ip||'').split('.');
-  return os+' .'+parts[parts.length-1];
+  return label+' .'+parts[parts.length-1];
 }
 
 function update3DMap(data) {
@@ -1897,7 +1914,7 @@ function update3DMap(data) {
     meshColor.setHex(c);
     instancedMesh.setColorAt(idx, meshColor);
     newNodesMap.set(ip, {node: n, index: idx, pos: pos});
-    nodeDataByIndex.set(idx, {ip: ip, os: n.os || 'Unknown', risk: n.risk || 0, status: n.status || 'Active', blast: isBlast, exposed: isExposed});
+    nodeDataByIndex.set(idx, {ip: ip, os: n.os || 'Unknown', device: n.device || '', hostname: n.hostname || '', vendor: n.vendor || '', risk: n.risk || 0, status: n.status || 'Active', blast: isBlast, exposed: isExposed});
   });
   instancedMesh.instanceMatrix.needsUpdate = true;
   if (instancedMesh.instanceColor) instancedMesh.instanceColor.needsUpdate = true;
@@ -1995,8 +2012,15 @@ function animate() {
       const nd = nodeDataByIndex.get(idx);
       if (nd && idx !== hoveredNodeIdx) {
         hoveredNodeIdx = idx;
+        const device = deviceLabel(nd.device);
+        const title = [];
+        if (device && device.toUpperCase() !== 'HOST') title.push(device);
+        if (nd.hostname) title.push(nd.hostname);
+        document.getElementById('tip-name').textContent = title.join(' · ') || nd.ip;
         document.getElementById('tip-ip').textContent = nd.ip;
-        document.getElementById('tip-os').textContent = nd.os;
+        const osLine = [nd.os, nd.vendor]
+          .filter(v => v && v !== 'Unknown').join(' · ');
+        document.getElementById('tip-os').textContent = osLine || 'Unknown';
         document.getElementById('tip-role').textContent = nd.risk > 50 ? 'Critical' : nd.risk > 20 ? 'Standard' : 'Low';
         document.getElementById('tip-status').textContent = nd.status || 'Active';
         const pdata = portCache.get(nd.ip);

@@ -73,6 +73,76 @@ class TestDiscovery:
         hosts = asyncio.run(wired.discover_hosts("10.44.0.0/24"))
         assert hosts == [{"ip": "10.44.0.7", "mac": "UNKNOWN"}]
 
+    def test_nmap_hostname_and_vendor_are_retained(self, monkeypatch):
+        class Host:
+            def state(self):
+                return "up"
+
+            def __getitem__(self, key):
+                if key == "addresses":
+                    return {"mac": "14:33:75:aa:bb:cc"}
+                if key == "vendor":
+                    return {"14:33:75:aa:bb:cc": "Zyxel"}
+                raise KeyError(key)
+
+            def hostname(self):
+                return "router.lan"
+
+        class Scanner:
+            def scan(self, *_args, **_kwargs):
+                return None
+
+            def all_hosts(self):
+                return ["10.44.0.1"]
+
+            def __getitem__(self, _ip):
+                return Host()
+
+        async def no_resolution(_ips, **_kwargs):
+            return {}
+
+        monkeypatch.setattr(wired, "_arp_sweep", lambda *_a, **_k: [])
+        monkeypatch.setattr(wired.nmap, "PortScanner", Scanner)
+        monkeypatch.setattr(wired, "resolve_hostnames", no_resolution)
+
+        hosts = asyncio.run(wired.discover_hosts("10.44.0.0/24"))
+        assert hosts == [{
+            "ip": "10.44.0.1", "mac": "14:33:75:AA:BB:CC",
+            "hostname": "router.lan", "vendor": "Zyxel",
+        }]
+
+    def test_missing_hostname_is_resolved_through_nss(self, monkeypatch):
+        class Host:
+            def state(self):
+                return "up"
+
+            def __getitem__(self, key):
+                if key == "addresses":
+                    return {}
+                raise KeyError(key)
+
+        class Scanner:
+            def scan(self, *_args, **_kwargs):
+                return None
+
+            def all_hosts(self):
+                return ["10.44.0.7"]
+
+            def __getitem__(self, _ip):
+                return Host()
+
+        async def resolver(ips, **_kwargs):
+            assert ips == ["10.44.0.7"]
+            return {"10.44.0.7": "I2011"}
+
+        monkeypatch.setattr(wired, "_arp_sweep", lambda *_a, **_k: [])
+        monkeypatch.setattr(wired.nmap, "PortScanner", Scanner)
+        monkeypatch.setattr(wired, "resolve_hostnames", resolver)
+
+        hosts = asyncio.run(wired.discover_hosts("10.44.0.0/24"))
+        assert hosts == [
+            {"ip": "10.44.0.7", "mac": "UNKNOWN", "hostname": "I2011"}]
+
     def test_both_sources_failing_returns_empty_not_crash(self, monkeypatch):
         def no_root(*_args):
             raise PermissionError("raw socket permission denied")

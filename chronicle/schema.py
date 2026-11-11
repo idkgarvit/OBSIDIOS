@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS hosts (
     os_name          TEXT,
     os_accuracy     INTEGER,
     vendor          TEXT,
+    device          TEXT,
     first_seen      REAL    NOT NULL DEFAULT (unixepoch('now','subsec')),
     last_seen       REAL    NOT NULL DEFAULT (unixepoch('now','subsec')),
     is_active       INTEGER NOT NULL DEFAULT 1,

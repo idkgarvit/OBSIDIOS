@@ -105,7 +105,7 @@ _CPE_MAP: dict[str, tuple[str, str]] = {
     "mediawiki":                      ("mediawiki", "mediawiki"),
     "cgi":                            ("apache", "http_server"),
     "fastcgi":                        ("apache", "http_server"),
-    "dnsmasq":                        ("the_kelleys", "dnsmasq"),
+    "dnsmasq":                        ("thekelleys", "dnsmasq"),
     "bind":                           ("isc", "bind"),
     "isc bind":                       ("isc", "bind"),
     "unbound":                        ("nlnetlabs", "unbound"),
@@ -124,6 +124,8 @@ _GENERIC_PRODUCT_WORDS = {"httpd", "server", "web", "http", "https", "tcp", "udp
 # Products known to produce false-positive CVE matches (description contains product name
 # but CVE is about a DIFFERENT product with similar name)
 _NEGATIVE_PRODUCT_WORDS: dict[str, list[str]] = {
+    "openssh":           ["dropbear", "vyos"],
+    "dnsmasq":           ["luci", "oray", "pugongying", "libvirt"],
     "mysql":             ["mariadb", "mod_authnz_external", "phpmyadmin", "adminer", "percona", "trustwave", "webdefend", "advanced poll", "postgresql", "mongodb", "redis"],
     "apache httpd":      ["tomcat", "activemq", "cxf", "struts", "log4j", "spark", "flink", "hadoop", "cassandra", "akeneo", "pim", "sonicwall", "ivanti", "mobileiron", "pulpcore", "artifactory", "nexus", "jira", "confluence", "gitlab", "jenkins", "drupal", "wordpress"],
     "nginx":             ["unit", "ingress"],
@@ -228,7 +230,11 @@ _MAX_AFFECTED_CONSTRAINTS = 64
 _MAX_DESCRIPTION_CONSTRAINTS = 8
 
 
-def _extract_affected_versions(description: str, cve_config: list | dict | None = None) -> list[dict]:
+def _extract_affected_versions(
+    description: str,
+    cve_config: list | dict | None = None,
+    expected_cpe: tuple[str, str] | None = None,
+) -> list[dict]:
     """Extract affected version constraints for a CVE.
 
     NVD's machine-readable ``configurations`` block is authoritative: it is
@@ -236,6 +242,12 @@ def _extract_affected_versions(description: str, cve_config: list | dict | None 
     for CVEs that have no version bounds in their CPE matches. The old code
     did the reverse, so a loose description regex could override precise NVD
     bounds — and a second release line was ignored entirely.
+
+    When ``expected_cpe`` is supplied, only CPE matches for that exact
+    ``(vendor, product)`` pair may contribute bounds. Advisories routinely
+    list a bundled OS or appliance alongside the application; merging their
+    ranges produced ``CONFIRMED`` verdicts for versions the advisory never
+    named.
     """
     constraints: list[dict] = []
     seen: set[tuple] = set()
@@ -252,10 +264,25 @@ def _extract_affected_versions(description: str, cve_config: list | dict | None 
         seen.add(key)
         constraints.append(constraint)
 
+    matches = list(_iter_cpe_matches(cve_config))
+    cpe_authoritative = bool(matches)
+    if expected_cpe:
+        expected_pair = (str(expected_cpe[0]).lower(), str(expected_cpe[1]).lower())
+        scoped = [
+            m for m in matches
+            if _cpe_vendor_product(m.get("criteria")) == expected_pair
+        ]
+        if cpe_authoritative:
+            if not scoped:
+                # Authoritative CPE data exists and none of it names the
+                # fingerprinted product: this advisory is about something else.
+                return []
+            matches = scoped
+
     # Prefer authoritative CPE bounds. Only ranges with at least one bound are
     # useful; a bare ``criteria`` version is the product fingerprint, not an
     # affected-version statement.
-    for m in _iter_cpe_matches(cve_config):
+    for m in matches:
         if m.get("vulnerable") is False:
             continue
         end_including = m.get("versionEndIncluding")
@@ -281,6 +308,13 @@ def _extract_affected_versions(description: str, cve_config: list | dict | None 
 
     if constraints:
         return constraints
+
+    # With an exact product fingerprint, a CPE block that names the product
+    # but carries no version bounds is still authoritative. Falling back to
+    # prose here can import a bound that describes a different product in the
+    # same bundled advisory, so leave the verdict UNVERIFIED instead.
+    if cpe_authoritative and expected_cpe:
+        return []
 
     patterns = [
         (r'versions?\s+(?:prior\s+to|before)\s+(\d+(?:\.\d+)*(?:[a-z]\d*)?)', 'end', True),
@@ -439,12 +473,24 @@ def _severity_from(score: float | None, label: object) -> Severity:
     return Severity.NONE
 
 
-def _parse_response(data: dict) -> tuple[list[CVE], dict[str, list[dict]], dict[str, set[tuple[str, str]]]]:
+def _parse_response(
+    data: dict,
+    expected_cpe: tuple[str, str] | None = None,
+) -> tuple[list[CVE], dict[str, list[dict]], dict[str, set[tuple[str, str]]]]:
     """Parse NVD response. Returns (list of CVE, version_affected, cpe_map).
-    cpe_map is cve_id -> set of (vendor, product) from CPE match strings."""
+    cpe_map is cve_id -> set of (vendor, product) from CPE match strings.
+
+    ``expected_cpe`` is the product the port actually fingerprints. NVD
+    configurations are authoritative: when a CVE carries CPE data but none of
+    it names the expected product, the CVE is discarded before prose matching
+    gets a chance to attach a Bash advisory to an OpenSSH port.
+    """
     cves = []
     affected_map = {}
     cpe_map: dict[str, set[tuple[str, str]]] = {}
+    expected_pair = None
+    if expected_cpe:
+        expected_pair = (str(expected_cpe[0]).lower(), str(expected_cpe[1]).lower())
     if not isinstance(data, dict):
         return cves, affected_map, cpe_map
     for item in (data.get("vulnerabilities") or []):
@@ -488,21 +534,26 @@ def _parse_response(data: dict) -> tuple[list[CVE], dict[str, list[dict]], dict[
         severity = _severity_from(cvss_v3, sev)
 
         config = c.get("configurations", {})
-        affected = _extract_affected_versions(desc, config)
-        affected_map[cve_id] = affected
-
-        # Extract CPE vendor:product pairs from configurations
+        # A ``vulnerable: false`` match describes the platform the vulnerable
+        # product runs on, not a product the advisory covers. Only vulnerable
+        # matches may authorise a CVE for this fingerprint.
         cpe_set: set[tuple[str, str]] = set()
-        for match in _iter_cpe_matches(config):
-            criteria = match.get("criteria")
-            if not isinstance(criteria, str):
+        cpe_matches = list(_iter_cpe_matches(config))
+        for match in cpe_matches:
+            if match.get("vulnerable") is False:
                 continue
-            parts = criteria.split(":")
-            if len(parts) >= 6 and parts[0] == "cpe":
-                vendor = parts[3]
-                product = parts[4]
-                if vendor != "*" and product != "*":
-                    cpe_set.add((vendor, product))
+            pair = _cpe_vendor_product(match.get("criteria"))
+            if pair is not None:
+                cpe_set.add(pair)
+
+        if expected_pair and cpe_matches and expected_pair not in cpe_set:
+            # The authoritative CPE block names only other products (or only
+            # platforms, as ``vulnerable: false`` entries). Do not let a prose
+            # mention of "OpenSSH" smuggle in a GNU Bash advisory.
+            continue
+
+        affected = _extract_affected_versions(desc, config, expected_pair)
+        affected_map[cve_id] = affected
         if cpe_set:
             cpe_map[cve_id] = cpe_set
 
@@ -513,11 +564,32 @@ def _parse_response(data: dict) -> tuple[list[CVE], dict[str, list[dict]], dict[
     return cves, affected_map, cpe_map
 
 
+def _mentions_in_opening(description: str, names: list[str]) -> bool:
+    """True when a product name appears in the advisory's opening sentence.
+
+    NVD states the affected product in the first sentence ("A flaw was found
+    in dnsmasq. ..."). A later mention can be an incidental component of a
+    different product ("... in Oray Pugongying X5 Pro. ... component Dnsmasq"),
+    which is not a claim about the fingerprinted product.
+    """
+    text = (description or "").strip()
+    if not text:
+        return False
+    opening = re.split(r"(?<=[.!?])\s+|\n", text, maxsplit=1)[0].lower()
+    for name in names or []:
+        if not isinstance(name, str) or not name:
+            continue
+        if re.search(r"(?:^|[^a-z0-9])" + re.escape(name) + r"(?:[^a-z0-9]|$)",
+                     opening):
+            return True
+    return False
+
+
 async def lookup_cves(session, service, version=None, product=None,
                       api_key=None, cpe=None) -> tuple[list[CVE], dict[str, list[dict]]]:
     if not service: return [], {}
     svc = _normalize_service(service)
-    if svc in _GENERIC_SERVICES: return [], {}
+    if svc in _GENERIC_SERVICES and not product and not cpe: return [], {}
     # A CPE is a usable fingerprint even when Nmap named no product.
     if svc in _GENERIC_PROTOCOLS and not product and not cpe: return [], {}
     key = _cache_key(service, version, product or cpe)
@@ -561,7 +633,8 @@ async def lookup_cves(session, service, version=None, product=None,
             async with session.get(_NVD_BASE, params=params, headers=headers,
                                    timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status == 200:
-                    results, aff_map, cpe_map = _parse_response(await resp.json(content_type=None))
+                    results, aff_map, cpe_map = _parse_response(
+                        await resp.json(content_type=None), expected_cpe)
                     completed = True
                     # ── Filter by CPE match first, then description ──
                     if results:
@@ -577,29 +650,39 @@ async def lookup_cves(session, service, version=None, product=None,
                             # 1. CPE-based match (most reliable)
                             desc = (cve.description or "").lower()
                             cpe_matches = cpe_map.get(cve.cve_id, set())
-                            if expected_cpe and cpe_matches:
+                            if cpe_matches and expected_cpe:
                                 ev, ep = expected_cpe
-                                cpe_hit = expected_cpe in cpe_matches or any(v == ev and p == ep for v, p in cpe_matches)
-                                if cpe_hit:
-                                    # CPE matched — but check if CVE is about a BUNDLED product (not ours)
-                                    other_vendors = {v for v, p in cpe_matches if v != ev}
-                                    if other_vendors and desc:
-                                        other_names = [p.replace('_', ' ') for v, p in cpe_matches if v != ev]
-                                        # If description mentions other bundled products more prominently than ours
-                                        if any(re.search(r'\b' + re.escape(n) + r'\b', desc) for n in other_names if len(n) > 3):
-                                            prod_in_desc = prod_lower and re.search(r'\b' + re.escape(prod_lower) + r'\b', desc)
-                                            if not prod_in_desc and not any(
-                                                re.search(r'\b' + re.escape(w) + r'\b', desc) for w in product_words
-                                            ):
-                                                continue  # description talks about the bundled product, not ours
-                                        if negative_words and any(w in desc for w in negative_words):
-                                            continue
-                                    filtered.append(cve)
+                                if (ev, ep) not in cpe_matches:
+                                    # Hard gate: authoritative CPE data that
+                                    # does not name this product beats any
+                                    # amount of prose similarity.
                                     continue
+                                # CPE matched — but check if CVE is about a BUNDLED product (not ours)
+                                other_vendors = {v for v, p in cpe_matches if v != ev}
+                                if other_vendors and desc:
+                                    other_names = [p.replace('_', ' ') for v, p in cpe_matches if v != ev]
+                                    # If description mentions other bundled products more prominently than ours
+                                    if any(re.search(r'\b' + re.escape(n) + r'\b', desc) for n in other_names if len(n) > 3):
+                                        prod_in_desc = prod_lower and re.search(r'\b' + re.escape(prod_lower) + r'\b', desc)
+                                        if not prod_in_desc and not any(
+                                            re.search(r'\b' + re.escape(w) + r'\b', desc) for w in product_words
+                                        ):
+                                            continue  # description talks about the bundled product, not ours
+                                if negative_words and any(w in desc for w in negative_words):
+                                    continue
+                                filtered.append(cve)
+                                continue
                             # 2. Description-based match (fallback for CVEs without CPE config)
                             if not desc: continue
                             # Skip if any negative keyword matches
                             if negative_words and any(w in desc for w in negative_words):
+                                continue
+                            opening_names = [prod_lower, *product_words, *aliases]
+                            if not effective_product:
+                                opening_names.append(svc_lower)
+                            if not _mentions_in_opening(desc, opening_names):
+                                # The product is only an incidental component
+                                # of another vendor's product in this text.
                                 continue
                             # Word-boundary match on raw product name
                             if prod_lower and re.search(r'\b' + re.escape(prod_lower) + r'\b', desc):
@@ -666,7 +749,11 @@ async def map_cves_for_scan(scan_result, api_key=None) -> tuple[dict[str, list[C
             if not port.service:
                 continue
             svc = _normalize_service(port.service)
-            if svc in _GENERIC_SERVICES:
+            # A generic service label is not a reason to ignore a concrete
+            # product/CPE fingerprint. Nmap calls the router's TLS multiplexer
+            # "rtsp" while identifying mini_httpd; skipping the port preserved
+            # old Belkin/Linksys mappings that the CPE gate would now reject.
+            if svc in _GENERIC_SERVICES and not port.product and not port.cpe:
                 logger.debug(f"[IRIS/CVE] Skipping {ip}:{port.port} — generic service '{svc}'")
                 skipped_generic += 1
                 continue
@@ -701,9 +788,30 @@ async def map_cves_for_scan(scan_result, api_key=None) -> tuple[dict[str, list[C
     return result_map, affected_map
 
 
+_NVD_CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,}$")
+
+
+def _lookup_succeeded(port) -> bool:
+    """True when this scan received an authoritative NVD answer for the port.
+
+    `lookup_cves` caches every successful response, including an empty one,
+    and never caches a failure. The cache is therefore the record of which
+    fingerprints were actually checked. Pruning on a failed lookup would
+    erase valid history during an NVD outage.
+    """
+    service = getattr(port, "service", None)
+    if not service:
+        return False
+    key = _cache_key(
+        service,
+        getattr(port, "version", None),
+        getattr(port, "product", None) or getattr(port, "cpe", None),
+    )
+    return _cache.get(key) is not None
+
+
 async def persist_cves(cve_map: dict, scan_result, affected_map: dict | None = None) -> int:
     all_cves = {cve.cve_id: cve for cves in cve_map.values() for cve in cves}
-    if not all_cves: return 0
     cve_id_map = {}
     if affected_map is None: affected_map = {}
 
@@ -809,6 +917,56 @@ async def persist_cves(cve_map: dict, scan_result, affected_map: dict | None = N
                                                  excluded.detected_version)""",
                 rows_to_write,
             )
+
+        # ── Retire stale mappings for authoritative lookups ──────────────
+        # A successful NVD response is the complete answer for that exact
+        # fingerprint. Rows left over from an older matcher (Shellshock on
+        # OpenSSH, Linksys firmware on mini_httpd) otherwise survive forever
+        # because the old write path only ever upserted.
+        allowed_by_port: dict[int, set[int]] = {}
+        for ip, ports in scan_result.ports.items():
+            if host_ids.get(ip) is None:
+                continue
+            for port in ports:
+                if not _lookup_succeeded(port):
+                    continue
+                port_db_id = port_ids.get((ip, port.port))
+                if port_db_id is None:
+                    continue
+                allowed = allowed_by_port.setdefault(port_db_id, set())
+                allowed.update(
+                    cve_id_map[cve.cve_id]
+                    for cve in cve_map.get(f"{ip}:{port.port}", [])
+                    if cve.cve_id in cve_id_map
+                )
+
+        if allowed_by_port:
+            port_id_json = json.dumps(sorted(allowed_by_port))
+            async with conn.execute(
+                "SELECT pc.port_id, pc.cve_id, c.cve_id AS external_id "
+                "FROM port_cves pc JOIN cves c ON c.id = pc.cve_id "
+                "WHERE pc.port_id IN (SELECT value FROM json_each(?)) "
+                "AND COALESCE(pc.dismissed, 0) = 0",
+                (port_id_json,),
+            ) as cur:
+                existing = await cur.fetchall()
+            stale = [
+                (row["port_id"], row["cve_id"])
+                for row in existing
+                # Nuclei findings are keyed by rule id, not NVD data. Only
+                # NVD CVE rows are within this lookup's authority.
+                if _NVD_CVE_RE.match(str(row["external_id"] or ""))
+                and row["cve_id"] not in allowed_by_port.get(row["port_id"], set())
+            ]
+            if stale:
+                await conn.executemany(
+                    "DELETE FROM port_cves WHERE port_id=? AND cve_id=?",
+                    stale,
+                )
+                logger.info(
+                    f"[IRIS/CVE] Pruned {len(stale)} stale CVE mapping(s) "
+                    "for authoritatively re-checked ports"
+                )
     return len(all_cves)
 
 

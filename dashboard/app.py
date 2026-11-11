@@ -995,7 +995,8 @@ def api_graph_v2():
         # that are active right now may reach the topology.
         active_hosts = [
             host for host in (db.fetch_all(
-                "SELECT ip, risk_score, os_name, vendor FROM hosts "
+                "SELECT ip, risk_score, os_name, vendor, hostname, device "
+                "FROM hosts "
                 "WHERE is_active=1 AND ip IS NOT NULL AND ip != '' ORDER BY ip"
             ) or [])
             if isinstance(host.get('ip'), str) and host['ip'].strip()
@@ -1022,14 +1023,30 @@ def api_graph_v2():
             except (ValueError, TypeError) as exc:
                 logger.warning(f"[DASHBOARD] Ignoring corrupt graph cache: {exc}")
 
-        nodes = [
-            cache_by_ip.get(host['ip']) or {
-                'id': host['ip'],
-                'risk': host['risk_score'] or 0,
-                'os': host['os_name'] or host['vendor'] or 'Unknown',
-            }
-            for host in active_hosts
-        ]
+        nodes = []
+        for host in active_hosts:
+            ip = host['ip']
+            # The cache is written by the daemon after a scan and can predate
+            # the identity columns. Fresh DB identity must win; cached runtime
+            # fields (asset, cve_count, blast metadata) are still useful.
+            node = dict(cache_by_ip.get(ip) or {})
+            node['id'] = ip
+            node['risk'] = (host['risk_score'] if host.get('risk_score') is not None
+                            else node.get('risk', 0))
+            node['os'] = (host.get('os_name') or host.get('vendor')
+                          or node.get('os') or 'Unknown')
+            for field in ('hostname', 'vendor', 'device'):
+                # The DB is current state. If a rescan cleared the vendor
+                # (the MAC changed), keep it cleared instead of reviving the
+                # stale cache value. Absent columns (older callers) stay absent.
+                if field not in host:
+                    continue
+                value = host.get(field)
+                if isinstance(value, str) and value.strip():
+                    node[field] = value.strip()
+                elif field in node:
+                    node[field] = ''
+            nodes.append(node)
         active_set = set(active_ips)
 
         # Build simplified links: gateway-star + attack-path edges
@@ -1114,7 +1131,7 @@ def api_anomalous_ports():
 @requires_auth
 def api_details_hosts():
     try:
-        hosts = db.fetch_all('SELECT ip, mac, hostname, os_name, vendor, risk_score, asset_value, last_seen FROM hosts WHERE is_active=1 ORDER BY risk_score DESC')
+        hosts = db.fetch_all('SELECT ip, mac, hostname, os_name, vendor, device, risk_score, asset_value, last_seen FROM hosts WHERE is_active=1 ORDER BY risk_score DESC')
         return jsonify({'data': hosts})
     except Exception as e:
         return _internal_error(e)
@@ -1170,7 +1187,7 @@ def api_host_detail():
         return jsonify({'error': 'Valid IP address required'}), 400
     try:
         host = db.fetch_one(
-            'SELECT id, ip, mac, hostname, os_name, vendor, risk_score, '
+            'SELECT id, ip, mac, hostname, os_name, vendor, device, risk_score, '
             'asset_value, first_seen, last_seen FROM hosts '
             'WHERE ip=? AND is_active=1', (ip,)
         )
@@ -1506,8 +1523,8 @@ def api_export_data(format_type):
             return jsonify({'error': 'unsupported format'}), 404
         data_type = request.args.get('type', 'hosts')
         if data_type == 'hosts':
-            data = db.fetch_all('SELECT ip, mac, hostname, os_name, risk_score, asset_value FROM hosts WHERE is_active=1')
-            headers = ['ip', 'mac', 'hostname', 'os_name', 'risk_score', 'asset_value']
+            data = db.fetch_all('SELECT ip, mac, hostname, os_name, vendor, device, risk_score, asset_value FROM hosts WHERE is_active=1')
+            headers = ['ip', 'mac', 'hostname', 'os_name', 'vendor', 'device', 'risk_score', 'asset_value']
         elif data_type == 'cves':
             # Match what the CVE page shows: dismissed false positives and
             # retired hosts must not reappear in the export.

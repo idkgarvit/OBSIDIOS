@@ -159,6 +159,7 @@ COLUMN_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     ],
     "hosts": [
         ("offline_since", "REAL"),
+        ("device", "TEXT"),
     ],
     "forge_rules": [
         ("delivered_at", "REAL"),

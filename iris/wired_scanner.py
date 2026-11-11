@@ -30,6 +30,7 @@ from chronicle.live_state import retire_stale_attack_paths
 from chronicle.models import Host, Port, ScanResult
 from config.settings import scan as scan_cfg
 from config.settings import validate_nmap_arguments, validate_target_cidr
+from iris.fingerprint import infer_device, resolve_hostnames, resolve_vendor
 
 
 async def get_target_from_db() -> str:
@@ -108,6 +109,27 @@ def _arp_sweep(network: str, timeout: float) -> list[dict[str, str]]:
     answered, _ = srp(pkt, iface=target_iface, timeout=timeout, retry=2, verbose=False)
     return [{"ip": r.psrc, "mac": r.hwsrc.upper()} for _, r in answered]
 
+def _nmap_vendor(entry) -> str | None:
+    """Return Nmap's OUI vendor for a host, tolerating missing/junk blocks."""
+    try:
+        vendor = entry["vendor"]
+    except (KeyError, TypeError, IndexError):
+        return None
+    if isinstance(vendor, dict):
+        for name in vendor.values():
+            if not isinstance(name, str) or not name.strip():
+                continue
+            # python-nmap maps MAC -> vendor name; a degenerate backend can
+            # echo the MAC back as the value, which is not a vendor.
+            candidate = name.strip()
+            if re.fullmatch(r"(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}", candidate):
+                continue
+            return candidate[:128]
+    elif isinstance(vendor, str) and vendor.strip():
+        return vendor.strip()[:128]
+    return None
+
+
 async def discover_hosts(network: str) -> list[dict[str, str]]:
     # Defence in depth: callers such as the fast pulse loop read the target
     # from the DB, so validate here as well as in run_scan().
@@ -143,22 +165,74 @@ async def discover_hosts(network: str) -> list[dict[str, str]]:
         logger.warning(f"[IRIS] nmap sweep failed: {nmap_result}")
         nmap_result = None
 
-    hosts_dict = {h['ip']: h['mac'] for h in arp_results}
+    hosts_by_ip: dict[str, dict[str, str]] = {}
+
+    def _record(ip: str) -> dict[str, str]:
+        # Keep the historical shape when there is nothing extra to say: the
+        # discovery contract is {ip, mac} plus optional identity metadata.
+        return hosts_by_ip.setdefault(ip, {"ip": ip, "mac": "UNKNOWN"})
+
+    def _merge_identity(record: dict[str, str], source: dict) -> None:
+        mac = source.get("mac")
+        if isinstance(mac, str) and mac.strip() and (
+            record.get("mac") in (None, "", "UNKNOWN")
+        ):
+            record["mac"] = mac.strip().upper()
+        hostname = source.get("hostname")
+        if isinstance(hostname, str) and hostname.strip():
+            record["hostname"] = hostname.strip()[:128]
+        vendor = source.get("vendor")
+        if isinstance(vendor, str) and vendor.strip():
+            record["vendor"] = vendor.strip()[:128]
+
+    for item in arp_results or []:
+        if not isinstance(item, dict):
+            continue
+        ip = item.get("ip")
+        if not isinstance(ip, str) or not ip.strip():
+            continue
+        _merge_identity(_record(ip.strip()), item)
+
     if nmap_result is not None:
         for ip in nmap_result.all_hosts():
             # One malformed python-nmap record (missing addresses block, node
             # in a weird state) must not discard the hosts found before it.
             try:
                 entry = nmap_result[ip]
-                if entry.state() != 'up' or ip in hosts_dict:
+                if entry.state() != 'up':
                     continue
                 addresses = entry['addresses'] or {}
-                hosts_dict[ip] = (addresses.get('mac') or 'UNKNOWN').upper()
+                record = _record(ip)
+                _merge_identity(record, {"mac": addresses.get('mac')})
+                try:
+                    hostname = entry.hostname()
+                except Exception:
+                    hostname = ""
+                if isinstance(hostname, str) and hostname.strip():
+                    record["hostname"] = hostname.strip()[:128]
+                vendor = _nmap_vendor(entry)
+                if vendor:
+                    record["vendor"] = vendor
             except Exception as exc:
                 logger.debug(f"[IRIS] Skipping nmap entry {ip!r}: {exc}")
                 continue
-                
-    results = [{"ip": ip, "mac": mac} for ip, mac in hosts_dict.items()]
+
+    # Nmap's ping sweep does not ask NSS, so mDNS/DHCP names are missing on
+    # most home networks. Resolve them once, with a bounded wait per address.
+    missing = [ip for ip, record in hosts_by_ip.items()
+               if not record.get("hostname")]
+    if missing:
+        try:
+            resolved = await resolve_hostnames(missing)
+        except Exception as exc:
+            logger.debug(f"[IRIS] Hostname resolution failed: {exc}")
+            resolved = {}
+        for ip, name in resolved.items():
+            record = hosts_by_ip.get(ip)
+            if record is not None and name:
+                record["hostname"] = name
+
+    results = list(hosts_by_ip.values())
     logger.success(f"[IRIS] Discovery complete: {len(results)} hosts found in {time.perf_counter()-t0:.2f}s")
     return results
 
@@ -257,7 +331,7 @@ def _nmap_scan_host(ip: str, args: str) -> dict:
         state = h.state()
     except Exception:
         state = "unknown"
-    res = {"ip":ip,"hostname":hostname,"state":state,"os":[],"ports":[],"host_types":[]}
+    res = {"ip":ip,"hostname":hostname,"state":state,"vendor":_nmap_vendor(h),"os":[],"ports":[],"host_types":[]}
     if "osmatch" in h:
         for m in h["osmatch"]:
             if not isinstance(m, dict) or not m.get("name"):
@@ -403,20 +477,51 @@ async def _upsert_hosts(arp_hosts: list[dict], scan_data: list[dict]) -> dict[st
                 yield record
 
     nmap_by_ip = {r["ip"]: r for r in _valid(scan_data)}
-    mac_by_ip = {h["ip"]: h.get("mac") for h in _valid(arp_hosts)}
+    discovery_by_ip = {r["ip"]: r for r in _valid(arp_hosts)}
     # A routed host can appear in the nmap sweep without an ARP reply; it must
     # still be persisted. Union both discovery sources instead of ARP only.
-    all_ips = sorted(set(mac_by_ip) | set(nmap_by_ip))
+    all_ips = sorted(set(discovery_by_ip) | set(nmap_by_ip))
     for ip in all_ips:
-        raw_mac = mac_by_ip.get(ip)
-        mac = raw_mac.strip() if isinstance(raw_mac, str) and raw_mac.strip() else None
-        nd = nmap_by_ip.get(ip, {}); os_name = os_acc = None
+        discovery = discovery_by_ip.get(ip, {})
+        nd = nmap_by_ip.get(ip, {})
+        raw_mac = discovery.get("mac") or nd.get("mac")
+        if (isinstance(raw_mac, str) and raw_mac.strip()
+                and raw_mac.strip().upper() != "UNKNOWN"):
+            mac = raw_mac.strip().upper()
+        else:
+            mac = None
+        os_name = os_acc = None
         first = _first_os_entry(nd.get("os"))
         if first:
             os_name, os_acc = first.get("name"), first.get("accuracy")
         if mac:
             os_name, os_acc = _infer_os_from_mac(mac, os_name, os_acc)
-        row = await db.execute_returning("INSERT INTO hosts (ip,mac,hostname,os_name,os_accuracy,is_active,last_seen,offline_since) VALUES (?,?,?,?,?,1,?,NULL) ON CONFLICT(ip) DO UPDATE SET mac=COALESCE(excluded.mac, mac), hostname=COALESCE(NULLIF(excluded.hostname,''), hostname), os_name=COALESCE(excluded.os_name, os_name), last_seen=excluded.last_seen, is_active=1, offline_since=NULL RETURNING id", (ip, mac if mac and mac.upper() != 'UNKNOWN' else None, nd.get("hostname"), os_name, os_acc, now))
+        hostname = (_as_text(nd.get("hostname"))
+                    or _as_text(discovery.get("hostname")))
+        vendor = resolve_vendor(mac, nd.get("vendor") or discovery.get("vendor"))
+        device = infer_device(
+            ip=ip, mac=mac, hostname=hostname, vendor=vendor,
+            os_name=os_name, ports=nd.get("ports") or [],
+        )
+        row = await db.execute_returning(
+            "INSERT INTO hosts (ip,mac,hostname,os_name,os_accuracy,is_active,"
+            "last_seen,offline_since,vendor,device) "
+            "VALUES (?,?,?,?,?,1,?,NULL,?,?) "
+            "ON CONFLICT(ip) DO UPDATE SET "
+            "mac=COALESCE(excluded.mac, mac), "
+            "hostname=COALESCE(NULLIF(excluded.hostname,''), hostname), "
+            "os_name=COALESCE(excluded.os_name, os_name), "
+            # A changed MAC invalidates the old vendor; clearing it is more
+            # honest than keeping the previous NIC's identity.
+            "vendor=CASE WHEN excluded.mac IS NOT NULL "
+            "AND excluded.mac != COALESCE(mac,'') THEN excluded.vendor "
+            "ELSE COALESCE(NULLIF(excluded.vendor,''), vendor) END, "
+            "device=COALESCE(NULLIF(excluded.device,''), device), "
+            "last_seen=excluded.last_seen, is_active=1, offline_since=NULL "
+            "RETURNING id",
+            (ip, mac if mac and mac.upper() != 'UNKNOWN' else None,
+             hostname or None, os_name, os_acc, now, vendor, device),
+        )
         if row: host_id_map[ip] = row["id"]
     return host_id_map
 

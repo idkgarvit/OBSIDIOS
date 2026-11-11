@@ -465,6 +465,111 @@ class TestAffectedVersionsFromCpe:
         }]
 
 
+class TestCpeProductGate:
+    """An advisory must name the product the port actually runs.
+
+    Every regression here produced a critical Action-queue row on a live
+    network: GNU Bash advisories attached to OpenSSH, Belkin/Linksys firmware
+    attached to mini_httpd, and Microsoft OpenSSH-for-Windows on Linux.
+    """
+
+    @staticmethod
+    def _payload(cve_id, description, matches):
+        return {"vulnerabilities": [{"cve": {
+            "id": cve_id,
+            "descriptions": [{"lang": "en", "value": description}],
+            "metrics": {"cvssMetricV31": [{"cvssData": {
+                "baseScore": 9.8, "baseSeverity": "CRITICAL"}}]},
+            "configurations": [{"nodes": [{"cpeMatch": matches}]}],
+        }}]}
+
+    def test_bash_advisory_is_rejected_for_openssh(self):
+        from iris.cve_mapper import _parse_response
+
+        data = self._payload(
+            "CVE-2014-6271",
+            "GNU Bash before 4.3 allows remote code execution. OpenSSH is "
+            "mentioned only as a possible vector.",
+            [{"criteria": "cpe:2.3:a:gnu:bash:*:*:*:*:*:*:*:*",
+              "vulnerable": True, "versionEndIncluding": "4.3"}],
+        )
+
+        assert _parse_response(data, ("openbsd", "openssh"))[0] == []
+        accepted = _parse_response(data, ("gnu", "bash"))[0]
+        assert [c.cve_id for c in accepted] == ["CVE-2014-6271"]
+
+    def test_belkin_firmware_advisory_is_rejected_for_mini_httpd(self):
+        from iris.cve_mapper import _parse_response
+
+        data = self._payload(
+            "CVE-2020-26561",
+            "Belkin Linksys WRT 160NL firmware allows command injection.",
+            [{"criteria": "cpe:2.3:o:belkin:linksys_wrt_160nl_firmware:*:*:*:"
+                          "*:*:*:*:*", "vulnerable": True,
+              "versionEndExcluding": "1.0.4"}],
+        )
+
+        assert _parse_response(data, ("acme", "mini_httpd"))[0] == []
+
+    def test_microsoft_windows_advisory_is_rejected_for_linux_openssh(self):
+        from iris.cve_mapper import _parse_response
+
+        data = self._payload(
+            "CVE-2024-38077",
+            "OpenSSH for Windows in Microsoft Windows allows privilege "
+            "escalation.",
+            [{"criteria": "cpe:2.3:o:microsoft:windows:-:*:*:*:*:*:*:*",
+              "vulnerable": True}],
+        )
+
+        assert _parse_response(data, ("openbsd", "openssh"))[0] == []
+
+    def test_non_vulnerable_platform_cpe_does_not_authorise_the_cve(self):
+        """``vulnerable: false`` names the platform, not an affected product."""
+        from iris.cve_mapper import _parse_response
+
+        data = self._payload(
+            "CVE-2024-1111",
+            "A flaw in the kernel.",
+            [{"criteria": "cpe:2.3:o:linux:linux_kernel:-:*:*:*:*:*:*:*",
+              "vulnerable": False}],
+        )
+
+        assert _parse_response(data, ("openbsd", "openssh"))[0] == []
+
+    def test_bounds_are_scoped_to_the_matched_product(self):
+        """A bundled OS range must not bound the application's version."""
+        from iris.cve_mapper import _extract_affected_versions
+
+        config = [{"nodes": [{"cpeMatch": [
+            {"criteria": "cpe:2.3:a:openbsd:openssh:*:*:*:*:*:*:*:*",
+             "vulnerable": True, "versionEndExcluding": "9.8"},
+            {"criteria": "cpe:2.3:o:linux:linux_kernel:*:*:*:*:*:*:*:*",
+             "vulnerable": True, "versionEndExcluding": "6.1"},
+        ]}]}]
+
+        assert _extract_affected_versions("", config, ("openbsd", "openssh")) == [
+            {"versionStart": None, "versionEnd": "9.8", "inclusive": False}]
+        # Unscoped callers (older adapters, verify_all_cves) keep every branch.
+        assert _extract_affected_versions("", config) == [
+            {"versionStart": None, "versionEnd": "9.8", "inclusive": False},
+            {"versionStart": None, "versionEnd": "6.1", "inclusive": False},
+        ]
+
+    def test_authoritative_cpe_block_without_the_product_yields_no_bounds(self):
+        """Prose must not re-introduce bounds the CPE block contradicts."""
+        from iris.cve_mapper import _extract_affected_versions
+
+        config = [{"nodes": [{"cpeMatch": [
+            {"criteria": "cpe:2.3:a:gnu:bash:*:*:*:*:*:*:*:*",
+             "vulnerable": True, "versionEndIncluding": "4.3"},
+        ]}]}]
+
+        assert _extract_affected_versions(
+            "GNU Bash before 4.3 is affected.", config,
+            ("openbsd", "openssh")) == []
+
+
 class TestAffectedVersionsFromProse:
     def test_from_x_to_y_includes_the_named_end_release(self):
         """"versions from 1.0 to 2.0" names 2.0 as affected. Treating Y as an
@@ -585,6 +690,92 @@ class TestLookupCaching:
         assert asyncio.run(cve_cache.lookup_cves(session, "telnet")) == ([], {})
         assert session.calls == []
 
+    def test_generic_service_with_a_product_is_still_queried(
+            self, monkeypatch, cve_cache):
+        """The service label alone must not discard a real fingerprint."""
+        monkeypatch.setattr(cve_cache, "_rate_limit_pause", _no_pause)
+        payload = {"vulnerabilities": [{"cve": {
+            "id": "CVE-2020-26561",
+            "descriptions": [{"lang": "en", "value":
+                              "Belkin Linksys WRT 160NL firmware command injection."}],
+            "metrics": {"cvssMetricV31": [{"cvssData": {
+                "baseScore": 8.8, "baseSeverity": "HIGH"}}]},
+            "configurations": [{"nodes": [{"cpeMatch": [{
+                "criteria": "cpe:2.3:o:belkin:linksys_wrt_160nl_firmware:"
+                            "*:*:*:*:*:*:*:*",
+                "vulnerable": True, "versionEndExcluding": "1.0.4"}]}]}],
+        }}]}
+        session = _FakeSession([_FakeResponse(200, payload)])
+
+        result, _ = asyncio.run(cve_cache.lookup_cves(
+            session, "rtsp", "1.30", "mini_httpd",
+            cpe="cpe:/a:acme:mini_httpd:1.30"))
+
+        assert len(session.calls) == 1
+        assert result == [], "Belkin firmware must not attach to mini_httpd"
+
+    def test_vyos_dropbear_advisory_is_rejected_for_openssh(
+            self, monkeypatch, cve_cache):
+        """A CVE without CPE data can still be about another SSH daemon."""
+        monkeypatch.setattr(cve_cache, "_rate_limit_pause", _no_pause)
+        payload = {"vulnerabilities": [{"cve": {
+            "id": "CVE-2025-30095",
+            "descriptions": [{"lang": "en", "value":
+                              "VyOS with dropbear has shared private host keys. "
+                              "OpenSSH has a safeguard against this behavior."}],
+            "metrics": {"cvssMetricV31": [{"cvssData": {
+                "baseScore": 9.0, "baseSeverity": "CRITICAL"}}]},
+            "configurations": None,
+        }}]}
+        session = _FakeSession([_FakeResponse(200, payload)])
+
+        result, _ = asyncio.run(
+            cve_cache.lookup_cves(session, "ssh", "10.6p1", "OpenSSH"))
+
+        assert len(session.calls) == 1
+        assert result == []
+
+    def test_component_mention_in_a_later_sentence_is_rejected(
+            self, monkeypatch, cve_cache):
+        """Oray's appliance CVE names dnsmasq only as a component."""
+        monkeypatch.setattr(cve_cache, "_rate_limit_pause", _no_pause)
+        payload = {"vulnerabilities": [{"cve": {
+            "id": "CVE-2026-116233",
+            "descriptions": [{"lang": "en", "value":
+                              "A security vulnerability has been detected in "
+                              "Oray Pugongying X5 Pro 7.6.1. This impacts an "
+                              "unknown function of the component Dnsmasq."}],
+            "metrics": {"cvssMetricV31": [{"cvssData": {
+                "baseScore": 9.1, "baseSeverity": "CRITICAL"}}]},
+            "configurations": None,
+        }}]}
+        session = _FakeSession([_FakeResponse(200, payload)])
+
+        result, _ = asyncio.run(
+            cve_cache.lookup_cves(session, "domain", "2.84rc2", "dnsmasq"))
+
+        assert len(session.calls) == 1
+        assert result == []
+
+    def test_dnsmasq_named_as_the_subject_is_accepted(
+            self, monkeypatch, cve_cache):
+        monkeypatch.setattr(cve_cache, "_rate_limit_pause", _no_pause)
+        payload = {"vulnerabilities": [{"cve": {
+            "id": "CVE-2026-6507",
+            "descriptions": [{"lang": "en", "value":
+                              "A flaw was found in dnsmasq. A remote attacker "
+                              "could exploit an out-of-bounds write."}],
+            "metrics": {"cvssMetricV31": [{"cvssData": {
+                "baseScore": 7.5, "baseSeverity": "HIGH"}}]},
+            "configurations": None,
+        }}]}
+        session = _FakeSession([_FakeResponse(200, payload)])
+
+        result, _ = asyncio.run(
+            cve_cache.lookup_cves(session, "domain", "2.84rc2", "dnsmasq"))
+
+        assert [c.cve_id for c in result] == ["CVE-2026-6507"]
+
 
 async def _no_pause():
     return None
@@ -628,6 +819,29 @@ class TestCpeOnlyPorts:
             host_id=1, port=80, service="http")]})
 
         assert asyncio.run(cve_cache.map_cves_for_scan(scan)) == ({}, {})
+
+    def test_generic_service_with_a_product_is_queried(
+            self, monkeypatch, cve_cache):
+        """Port 443 identifies as rtsp but runs mini_httpd; scan it anyway."""
+        from chronicle.models import CVE, Port, ScanResult
+
+        calls = []
+
+        async def fake_lookup(session, service, version=None, product=None,
+                              api_key=None, cpe=None):
+            calls.append((service, product, cpe))
+            return [CVE(cve_id="CVE-2020-26561")], {}
+
+        monkeypatch.setattr(cve_cache, "lookup_cves", fake_lookup)
+        scan = ScanResult(target="10.0.0.1", ports={"10.0.0.1": [Port(
+            host_id=1, port=443, service="rtsp", product="mini_httpd",
+            version="1.30", cpe="cpe:/a:acme:mini_httpd:1.30")]})
+
+        cve_map, _ = asyncio.run(
+            cve_cache.map_cves_for_scan(scan, api_key="test-key"))
+
+        assert calls == [("rtsp", "mini_httpd", "cpe:/a:acme:mini_httpd:1.30")]
+        assert [c.cve_id for c in cve_map["10.0.0.1:443"]] == ["CVE-2020-26561"]
 
 
 # ── Persistence ─────────────────────────────────────────────────────────────
@@ -753,6 +967,156 @@ class TestPersistCvesWritePath:
                     " WHERE h.ip=? AND p.port=?", (ip, port))
 
             assert run_async(read())["verified_status"] == "UNVERIFIED"
+        finally:
+            _cleanup_rows(ip, [cve_id])
+
+
+# ── Stale mapping pruning ───────────────────────────────────────────────────
+
+def _seed_mapping(ip: str, port: int, cve_id: str, *, dismissed: int = 0,
+                  service: str = "ssh", product: str = "openssh",
+                  version: str = "8.9") -> int:
+    """Seed a host/port/CVE mapping and return the port id."""
+    from chronicle import db
+    from dashboard.app import run_async
+
+    async def scenario():
+        # Reuse an existing host/port so several mappings can be seeded on the
+        # same port (a host delete would cascade them away).
+        await db.execute(
+            "INSERT OR IGNORE INTO hosts (ip, is_active) VALUES (?, 1)", (ip,))
+        host_id = await db.fetch_val("SELECT id FROM hosts WHERE ip=?", (ip,))
+        await db.execute(
+            "INSERT OR IGNORE INTO ports (host_id, port, protocol, state,"
+            " service, product, version) VALUES (?,?,?,?,?,?,?)",
+            (host_id, port, "tcp", "open", service, product, version))
+        port_id = await db.fetch_val(
+            "SELECT id FROM ports WHERE host_id=? AND port=?", (host_id, port))
+        await db.execute(
+            "INSERT INTO cves (cve_id, severity, description) VALUES (?,?,?)"
+            " ON CONFLICT(cve_id) DO UPDATE SET description=excluded.description",
+            (cve_id, "CRITICAL", "stale mapping"))
+        cve_pk = await db.fetch_val("SELECT id FROM cves WHERE cve_id=?", (cve_id,))
+        await db.execute(
+            "INSERT INTO port_cves (port_id, cve_id, verified_status, dismissed)"
+            " VALUES (?,?,?,?)"
+            " ON CONFLICT(port_id, cve_id) DO UPDATE SET"
+            " verified_status=excluded.verified_status,"
+            " dismissed=excluded.dismissed",
+            (port_id, cve_pk, "CONFIRMED", dismissed))
+        return port_id
+
+    return run_async(scenario())
+
+
+class TestStaleCvePruning:
+    @staticmethod
+    def _scan(ip: str, port: int, *, service="ssh", product="openssh",
+              version="8.9"):
+        from chronicle.models import Port, ScanResult
+
+        return ScanResult(target=ip, ports={ip: [Port(
+            host_id=0, port=port, service=service, product=product,
+            version=version)]})
+
+    @staticmethod
+    def _mark_lookup_succeeded(service, version, product):
+        from iris.cve_mapper import _cache, _cache_key
+
+        _cache.set(_cache_key(service, version, product), ([], {}))
+
+    @staticmethod
+    def _mappings(ip: str, port: int) -> set[str]:
+        from chronicle import db
+        from dashboard.app import run_async
+
+        async def read():
+            rows = await db.fetch_all(
+                "SELECT c.cve_id FROM port_cves pc"
+                " JOIN ports p ON p.id = pc.port_id"
+                " JOIN cves c ON c.id = pc.cve_id"
+                " JOIN hosts h ON h.id = p.host_id"
+                " WHERE h.ip=? AND p.port=?", (ip, port))
+            return {r["cve_id"] for r in rows}
+
+        return run_async(read())
+
+    def test_successful_lookup_prunes_the_stale_row(self, cve_cache):
+        import uuid
+
+        from dashboard.app import run_async
+
+        ip = f"10.90.{uuid.uuid4().int % 200 + 20}.1"
+        cve_id = f"CVE-2024-{uuid.uuid4().int % 9000 + 1000}"
+        _seed_mapping(ip, 2222, cve_id)
+        self._mark_lookup_succeeded("ssh", "8.9", "openssh")
+
+        try:
+            run_async(cve_cache.persist_cves(
+                {}, self._scan(ip, 2222), {}))
+            assert self._mappings(ip, 2222) == set()
+        finally:
+            _cleanup_rows(ip, [cve_id])
+
+    def test_failed_lookup_preserves_history(self, cve_cache):
+        """An NVD outage must not erase mappings that were never re-checked."""
+        import uuid
+
+        from dashboard.app import run_async
+
+        ip = f"10.90.{uuid.uuid4().int % 200 + 20}.1"
+        cve_id = f"CVE-2024-{uuid.uuid4().int % 9000 + 1000}"
+        _seed_mapping(ip, 2223, cve_id)
+        # No cache entry → the lookup for this fingerprint did not succeed.
+        assert cve_cache._cache.get(
+            cve_cache._cache_key("ssh", "8.9", "openssh")) is None
+
+        try:
+            run_async(cve_cache.persist_cves(
+                {}, self._scan(ip, 2223), {}))
+            assert self._mappings(ip, 2223) == {cve_id}
+        finally:
+            _cleanup_rows(ip, [cve_id])
+
+    def test_dismissed_rows_and_nuclei_findings_survive_pruning(self, cve_cache):
+        import uuid
+
+        from dashboard.app import run_async
+
+        ip = f"10.90.{uuid.uuid4().int % 200 + 20}.1"
+        stale = f"CVE-2024-{uuid.uuid4().int % 9000 + 1000}"
+        dismissed = f"CVE-2024-{uuid.uuid4().int % 9000 + 1000}"
+        nuclei = f"NUCLEI-{uuid.uuid4().hex[:10]}"
+        _seed_mapping(ip, 2224, stale)
+        _seed_mapping(ip, 2224, dismissed, dismissed=1)
+        _seed_mapping(ip, 2224, nuclei)
+        self._mark_lookup_succeeded("ssh", "8.9", "openssh")
+
+        try:
+            run_async(cve_cache.persist_cves(
+                {}, self._scan(ip, 2224), {}))
+            assert self._mappings(ip, 2224) == {dismissed, nuclei}
+        finally:
+            _cleanup_rows(ip, [stale, dismissed, nuclei])
+
+    def test_mapping_still_reported_by_nvd_is_kept(self, cve_cache):
+        import uuid
+
+        from chronicle.models import CVE, Severity
+        from dashboard.app import run_async
+
+        ip = f"10.90.{uuid.uuid4().int % 200 + 20}.1"
+        cve_id = f"CVE-2024-{uuid.uuid4().int % 9000 + 1000}"
+        _seed_mapping(ip, 2225, cve_id)
+        self._mark_lookup_succeeded("ssh", "8.9", "openssh")
+
+        try:
+            run_async(cve_cache.persist_cves(
+                {f"{ip}:2225": [CVE(
+                    cve_id=cve_id, cvss_v3=7.5, severity=Severity.HIGH,
+                    description="still affected")]},
+                self._scan(ip, 2225), {}))
+            assert self._mappings(ip, 2225) == {cve_id}
         finally:
             _cleanup_rows(ip, [cve_id])
 
